@@ -124,11 +124,13 @@ def load_existing_db():
 def check_proxy_connection(proxy_url):
     try:
         proxies = {'http': proxy_url, 'https': proxy_url}
-        verify_ssl = CERT_FILE if os.path.exists(CERT_FILE) else False
-        requests.get("https://lumtest.com/myip.json", proxies=proxies, timeout=8, verify=verify_ssl)
+        # FORZAMOS FALSE TEMPORALMENTE PARA DIAGNOSTICO
+        requests.get("http://lumtest.com/myip.json", proxies=proxies, timeout=10, verify=False)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"   [DEBUG RED] Error: {e}") # Esto nos dirá EXACTAMENTE por qué falla
         return False
+
 
 def init_session(username, account_details):
     if username in BANNED_ACCOUNTS: return None
