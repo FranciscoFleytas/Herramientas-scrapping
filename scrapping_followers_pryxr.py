@@ -25,7 +25,7 @@ MIN_POSTS = 3
 ENGAGEMENT_THRESHOLD = 0.03
 BAD_POSTS_PERCENTAGE = 0.7
 POSTS_TO_CHECK = 10
-WORKERS_PER_ACCOUNT = 1  # MÁXIMO SEGURO: 2. Si subes a 3, riesgo alto.
+WORKERS_PER_ACCOUNT = 1 
 
 # --- RUTAS ---
 try:
@@ -39,7 +39,9 @@ SESSION_DIR = desktop
 
 # --- GLOBALES ---
 STATS_LOCK = threading.Lock()
+POOL_LOCK = threading.Lock() 
 SESSION_OBJECTS = {} 
+ACCOUNTS_POOL = [] 
 BANNED_ACCOUNTS = set()
 SAVED_USERS = set()
 WRITE_QUEUE = queue.Queue()
@@ -121,14 +123,15 @@ def load_existing_db():
 def init_session(username, password):
     if username in BANNED_ACCOUNTS: return None
 
+    # --- MODIFICACION CRITICA: Fail Fast ---
     L = instaloader.Instaloader(
         sleep=True,
         user_agent="Instagram 200.0.0.30.120 Android (29/10; 420dpi; 1080x2130; Google/google; pixel 4; qcom; en_US; 320922800)",
-        max_connection_attempts=3,
-        request_timeout=30
+        max_connection_attempts=1, # Solo 1 intento para fallar rápido
+        request_timeout=20,
+        fatal_status_codes=[400, 401, 429, 403] # ESTO EVITA LA ESPERA DE 30 MIN
     )
 
-    # Lógica Sticky IP Escalable: Cada usuario del TXT tendrá su propia IP única
     session_id = hashlib.md5(username.encode()).hexdigest()[:8]
     proxy_user_full = f"{PROXY_USER_BASE}-session-{session_id}"
     proxy_url = f"http://{proxy_user_full}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
@@ -139,18 +142,16 @@ def init_session(username, password):
     session_file = os.path.join(SESSION_DIR, f"{username}.session")
     
     try:
-        # Prioridad: Cargar sesión existente
         if os.path.exists(session_file):
             L.load_session_from_file(username, filename=session_file)
-            print(f"[{username}] Sesión OK.")
+            print(f"[{username}] Sesión cargada.")
         else:
-            # Fallback: Login con password del TXT
-            print(f"[{username}] Creando nueva sesión...")
+            print(f"[{username}] Creando nueva sesión (Login)...")
             L.login(username, password)
             L.save_session_to_file(filename=session_file)
             print(f"[{username}] Login OK.")
     except Exception as e:
-        print(f"[{username}] FALLO: {e}")
+        print(f"[{username}] ERROR INICIO: {e}")
         return None
 
     return L
@@ -167,10 +168,23 @@ def check_engagement_logic(L, profile):
     bad_posts = sum(1 for p in posts if p.likes < min_likes)
     return (bad_posts / len(posts)) >= BAD_POSTS_PERCENTAGE, bad_posts, (bad_posts / len(posts))
 
+def kill_account(username):
+    """Elimina la cuenta de la memoria y del pool activo."""
+    with POOL_LOCK:
+        if username in ACCOUNTS_POOL:
+            ACCOUNTS_POOL.remove(username)
+            print(f"\n[!!!] CUENTA ELIMINADA DEL POOL: {username}")
+    
+    if username in SESSION_OBJECTS:
+        del SESSION_OBJECTS[username]
+
 def worker_task(target_user, account_user):
     global PROCESSED_COUNT, SAVED_COUNT
-    L = SESSION_OBJECTS.get(account_user)
-    if not L: return
+    
+    if account_user not in SESSION_OBJECTS:
+        return
+
+    L = SESSION_OBJECTS[account_user]
 
     try:
         profile = instaloader.Profile.from_username(L.context, target_user)
@@ -189,66 +203,96 @@ def worker_task(target_user, account_user):
 
     except (instaloader.ConnectionException, instaloader.LoginRequiredException, instaloader.QueryReturnedBadRequestException) as e:
         err = str(e)
-        # MODIFICACION: Si es 401/Wait, matamos la cuenta en esta ejecución
-        if "401" in err or "429" in err or "wait" in err.lower() or "login" in err.lower():
-            print(f"\n[CRITICO] Cuenta {account_user} BLOQUEADA (401). Eliminando del pool...")
-            # Eliminamos la sesión de la memoria para que no se use más
-            if account_user in SESSION_OBJECTS:
-                del SESSION_OBJECTS[account_user]
-            return # Salir inmediatamente
+        # Ahora el 429 vendrá como excepción fatal, no como pausa
+        if "401" in err or "429" in err or "wait" in err.lower() or "login" in err.lower() or "403" in err:
+            kill_account(account_user)
+            return 
 
 def main():
+    global ACCOUNTS_POOL
     load_existing_db()
     
-    # 1. Cargar Cuentas
-    ACCOUNTS_DATA, ACCOUNTS_POOL = load_accounts_from_txt()
-    if not ACCOUNTS_POOL:
-        print("ERROR: Crea el archivo 'cuentas.txt' con formato usuario:pass")
+    # 1. Cargar cuentas
+    ACCOUNTS_DATA, raw_accounts = load_accounts_from_txt()
+    if not raw_accounts:
+        print("ERROR: Crea 'cuentas.txt'")
         return
 
-    print(f"--- Cargando {len(ACCOUNTS_POOL)} cuentas ---")
+    print(f"--- Cargando {len(raw_accounts)} cuentas ---")
     
-    valid_pool = []
-    for acc in ACCOUNTS_POOL:
+    # Inicializar sesiones
+    for acc in raw_accounts:
         l_instance = init_session(acc, ACCOUNTS_DATA[acc])
         if l_instance:
             SESSION_OBJECTS[acc] = l_instance
-            valid_pool.append(acc)
+            ACCOUNTS_POOL.append(acc)
     
-    ACCOUNTS_POOL = valid_pool
-    if not ACCOUNTS_POOL: return
+    if not ACCOUNTS_POOL: 
+        print("No hay cuentas válidas iniciadas.")
+        return
 
-    # 2. Calcular Workers
     total_workers = len(ACCOUNTS_POOL) * WORKERS_PER_ACCOUNT
-    print(f"\n>>> INICIANDO CON {total_workers} WORKERS ({WORKERS_PER_ACCOUNT} por cuenta) <<<")
+    print(f"\n>>> INICIANDO CON {total_workers} WORKERS <<<")
 
     writer_thread = CSVWriterThread(CSV_FILENAME)
     writer_thread.start()
 
-    master_acc = ACCOUNTS_POOL[0]
+    # --- LOGICA DE ELECCIÓN DE MAESTRO (MASTER ROTATION) ---
+    followers_iter = None
+    
+    # Usamos una copia para iterar, permitiendo que kill_account modifique la original
+    candidates_copy = list(ACCOUNTS_POOL)
+
+    for candidate_master in candidates_copy:
+        try:
+            print(f"Probando MAESTRO con: {candidate_master}...", end=" ")
+            L_candidate = SESSION_OBJECTS[candidate_master]
+            
+            target_profile_obj = instaloader.Profile.from_username(L_candidate.context, TARGET_PROFILE)
+            
+            # Prueba de fuego: ID de usuario. 
+            # Si hay 429, fatal_status_codes lanzará excepción AQUÍ, sin esperar 30 mins.
+            _ = target_profile_obj.userid 
+            
+            followers_iter = target_profile_obj.get_followers()
+            print(f"OK. ({target_profile_obj.followers} seguidores)")
+            break # Éxito
+        except Exception as e:
+            print(f"FALLÓ ({e}). Eliminando cuenta...")
+            kill_account(candidate_master)
+
+    if followers_iter is None:
+        print("\n[CRITICO] TODAS las cuentas fallaron (Posible bloqueo masivo o IP quemada).")
+        writer_thread.stop()
+        return
+
+    # --- INICIO DE EJECUCIÓN PARALELA ---
     try:
-        L_master = SESSION_OBJECTS[master_acc]
-        target = instaloader.Profile.from_username(L_master.context, TARGET_PROFILE)
-        followers_iter = target.get_followers()
-        
         with ThreadPoolExecutor(max_workers=total_workers) as executor:
             while True:
+                with POOL_LOCK:
+                    if not ACCOUNTS_POOL:
+                        print("\n\n[!!!] TODAS LAS CUENTAS MURIERON. DETENIENDO.")
+                        break
+                    current_pool = list(ACCOUNTS_POOL)
+
                 try:
                     follower = next(followers_iter)
+                    
                     if follower.username in SAVED_USERS: continue
                     
-                    # Round Robin mejorado para distribuir carga
-                    worker_acc = random.choice(ACCOUNTS_POOL)
+                    worker_acc = random.choice(current_pool)
                     executor.submit(worker_task, follower.username, worker_acc)
                     
-                    # Ritmo de inyección de tareas (ajustar según cantidad de workers)
-                    time.sleep(0.01 if total_workers > 10 else 0.1)
+                    time.sleep(0.1)
 
                 except StopIteration:
+                    print("\n--- Fin de la lista de seguidores ---")
                     break
                 except Exception as e:
-                    print(f"\n[Master Error] {e} - Pausando...")
-                    time.sleep(30)
+                    print(f"\n[Error Maestro] {e}")
+                    # Si el maestro muere a mitad de camino, es más seguro parar
+                    break
                     
     except KeyboardInterrupt:
         print("\nDeteniendo...")
