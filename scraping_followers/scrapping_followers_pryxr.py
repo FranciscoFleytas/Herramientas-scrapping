@@ -12,14 +12,17 @@ from itertools import islice
 import urllib3
 import instaloader
 
-# CREDENCIALES BRIGHT DATA
+# Desactivar advertencias SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- CREDENCIALES BRIGHT DATA ---
 PROXY_HOST = "brd.superproxy.io"
 PROXY_PORT = "33335"
 PROXY_USER_BASE = "brd-customer-hl_23e53168-zone-residential_proxy1"
 PROXY_PASS = "ei0g975bijby"
 
-# CONFIGURACION SCRAPING
-TARGET_PROFILE = "fin_newgen"
+# --- CONFIGURACION ---
+TARGET_PROFILE = "rkcoaching__"
 MIN_FOLLOWERS = 100
 MIN_POSTS = 3
 ENGAGEMENT_THRESHOLD = 0.03
@@ -27,16 +30,16 @@ BAD_POSTS_PERCENTAGE = 0.7
 POSTS_TO_CHECK = 10
 WORKERS_PER_ACCOUNT = 1 
 
-# --- CONFIGURACION DE RUTAS (DINAMICA) ---
-# Obtiene la ruta exacta donde esta guardado este script
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# --- PAISES PARA ROTACION ---
+PROXY_COUNTRIES = ['us', 'gb', 'es', 'fr', 'de', 'it']
 
+# --- RUTAS ---
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CUENTAS_FILE = os.path.join(SCRIPT_DIR, 'cuentas.txt')
-CERT_FILE = os.path.join(SCRIPT_DIR, 'brightdata_ca.crt')
 CSV_FILENAME = os.path.join(SCRIPT_DIR, f'leads_bajo_engagement_{TARGET_PROFILE}.csv')
 SESSION_DIR = SCRIPT_DIR 
 
-# GLOBALES
+# --- GLOBALES ---
 STATS_LOCK = threading.Lock()
 POOL_LOCK = threading.Lock() 
 SESSION_OBJECTS = {} 
@@ -49,7 +52,7 @@ SAVED_COUNT = 0
 
 def load_accounts_from_txt():
     if not os.path.exists(CUENTAS_FILE):
-        print(f"[ERROR] No se encontro {CUENTAS_FILE} en la carpeta del script.")
+        print(f"[ERROR] No se encontro {CUENTAS_FILE}")
         return {}, []
     
     accounts_data = {}
@@ -63,7 +66,6 @@ def load_accounts_from_txt():
                 user = parts[0].strip()
                 pwd = parts[1].strip()
                 backup_code = parts[2].strip() if len(parts) > 2 else None
-                
                 accounts_data[user] = {'pass': pwd, 'backup_code': backup_code}
                 accounts_list.append(user)
     return accounts_data, accounts_list
@@ -124,49 +126,60 @@ def load_existing_db():
 def check_proxy_connection(proxy_url):
     try:
         proxies = {'http': proxy_url, 'https': proxy_url}
-        # FORZAMOS FALSE TEMPORALMENTE PARA DIAGNOSTICO
-        requests.get("http://lumtest.com/myip.json", proxies=proxies, timeout=10, verify=False)
+        requests.get("https://lumtest.com/myip.json", proxies=proxies, timeout=10, verify=False)
         return True
-    except Exception as e:
-        print(f"   [DEBUG RED] Error: {e}") # Esto nos dirá EXACTAMENTE por qué falla
+    except Exception:
         return False
 
-
+# --- LOGICA DE INICIO CON GESTION DE COOKIES Y HEADERS ---
 def init_session(username, account_details):
     if username in BANNED_ACCOUNTS: return None
     
     password = account_details['pass']
     backup_code_static = account_details['backup_code']
 
-    # Verificar certificado
-    if not os.path.exists(CERT_FILE):
-        ssl_context = False 
-    else:
-        ssl_context = CERT_FILE
+    # Cabeceras para simular navegador real y forzar entrega de CSRF
+    BASE_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1"
+    }
 
-    for attempt in range(3):
+    for attempt in range(4):
         session_id = str(random.randint(10000000, 99999999))
-        proxy_user_full = f"{PROXY_USER_BASE}-session-{session_id}"
+        country_code = PROXY_COUNTRIES[attempt % len(PROXY_COUNTRIES)]
+        
+        proxy_user_full = f"{PROXY_USER_BASE}-country-{country_code}-session-{session_id}"
         proxy_url = f"http://{proxy_user_full}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
         
-        print(f"[{username}] Probando IP ({session_id})...", end=" ")
+        print(f"[{username}] IP: {country_code.upper()} ({session_id})...", end=" ")
 
         if not check_proxy_connection(proxy_url):
-            print("FALLO RED. Reintentando...")
+            print("FALLO RED. Rotando...")
             continue
 
-        print("RED OK. Conectando...")
+        print("OK. Conectando...")
 
+        # Configuracion de Instaloader
         L = instaloader.Instaloader(
             sleep=True,
-            user_agent="Instagram 200.0.0.30.120 Android (29/10; 420dpi; 1080x2130; Google/google; pixel 4; qcom; en_US; 320922800)",
+            user_agent=BASE_HEADERS['User-Agent'],
             max_connection_attempts=1,
             request_timeout=30,
             fatal_status_codes=[400, 401, 429, 403]
         )
         
+        # Inyeccion de Proxy y Headers
         L.context._session.proxies = {'http': proxy_url, 'https': proxy_url}
-        L.context._session.verify = ssl_context 
+        L.context._session.verify = False 
+        L.context._session.headers.update(BASE_HEADERS)
 
         session_file = os.path.join(SESSION_DIR, f"{username}.session")
 
@@ -177,23 +190,35 @@ def init_session(username, account_details):
                     print(f"[{username}] Sesion cargada de disco.")
                     return L
                 except:
-                    print(f"[{username}] Archivo sesion invalido.")
+                    print(f"[{username}] Sesion invalida.")
 
+            # --- VALIDACION CSRF TOKEN ---
             try:
-                L.context.get_json("https://www.instagram.com/data/shared_data/")
-            except: pass 
+                # Peticion GET inicial para obtener cookies
+                resp = L.context._session.get("https://www.instagram.com/", timeout=15)
+                
+                # Busqueda manual del token en el jar de cookies
+                token_found = False
+                for cookie in L.context._session.cookies:
+                    if cookie.name == 'csrftoken':
+                        token_found = True
+                        break
+                
+                if not token_found:
+                    print(f"[{username}] Error: Servidor no envio csrftoken (IP Bloqueada). Status: {resp.status_code}")
+                    continue # Rotar IP inmediatamente
+            
+            except Exception as e:
+                print(f"[{username}] Error conexion inicial: {e}")
+                continue
 
+            # Login
             try:
                 L.login(username, password)
             except instaloader.TwoFactorAuthRequiredException:
                 print(f"\n[2FA REQUERIDO] {username}")
                 
-                code_to_use = None
-                if backup_code_static:
-                    print(f"[{username}] Usando Codigo de Respaldo del TXT.")
-                    code_to_use = backup_code_static
-                else:
-                    code_to_use = input(f">> Ingresa codigo manual: ").strip()
+                code_to_use = backup_code_static if backup_code_static else input(f">> Codigo manual: ").strip()
                 
                 try:
                     L.context.two_factor_login(code_to_use)
@@ -201,15 +226,11 @@ def init_session(username, account_details):
                     print(f"[{username}] 2FA Exitoso.")
                     return L
                 except Exception as e:
-                    if "Expecting value" in str(e) or "JSON" in str(e) or "Connection" in str(e):
+                    if "Expecting value" in str(e) or "JSON" in str(e):
                         raise Exception("Fallo Proxy 2FA")
                     
                     print(f"[ERROR] Codigo rechazado: {e}")
-                    if backup_code_static:
-                        print(f"[{username}] El codigo del TXT fallo.")
-                        return None 
-                    
-                    if input("Reintentar manual? (s/n): ").lower() != 's': return None
+                    if backup_code_static or input("Reintentar manual? (s/n): ").lower() != 's': return None
 
             L.save_session_to_file(filename=session_file)
             print(f"[{username}] Login OK.")
@@ -220,7 +241,7 @@ def init_session(username, account_details):
             time.sleep(2)
             continue
 
-    print(f"[{username}] Imposible conectar tras 3 intentos.")
+    print(f"[{username}] Imposible conectar tras 4 intentos.")
     return None
 
 def check_engagement_logic(L, profile):
@@ -276,12 +297,8 @@ def main():
     
     ACCOUNTS_DATA, raw_accounts = load_accounts_from_txt()
     if not raw_accounts:
-        print("[ERROR] Crea 'cuentas.txt' en la misma carpeta que el script.")
+        print("[ERROR] Crea 'cuentas.txt' en la misma carpeta.")
         return
-
-    if not os.path.exists(CERT_FILE):
-        print(f"[ADVERTENCIA] No se encontro 'brightdata_ca.crt' en: {SCRIPT_DIR}")
-        print("La conexion sera insegura y propensa a fallos.\n")
 
     print(f"--- Cargando {len(raw_accounts)} cuentas ---")
     
