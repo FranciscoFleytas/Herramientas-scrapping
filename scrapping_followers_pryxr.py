@@ -3,22 +3,23 @@ import csv
 import os
 import threading
 import queue
-import hashlib 
 import random
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 import urllib3
 import instaloader
 
+# Desactivar advertencias SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CREDENCIALES BRIGHT DATA (ARGENTINA) ---
+# --- CREDENCIALES BRIGHT DATA ---
 PROXY_HOST = "brd.superproxy.io"
 PROXY_PORT = "33335"
 PROXY_USER_BASE = "brd-customer-hl_23e53168-zone-scrapping_usser-country-ar"
 PROXY_PASS = "6p7y5qv5mz4q"
 
-# --- CONFIGURACION DE SCRAPING ---
+# --- CONFIGURACION ---
 TARGET_PROFILE = "rkcoaching__"
 MIN_FOLLOWERS = 100
 MIN_POSTS = 3
@@ -49,9 +50,8 @@ PROCESSED_COUNT = 0
 SAVED_COUNT = 0
 
 def load_accounts_from_txt():
-    """Lee cuentas.txt y retorna lista y diccionario."""
     if not os.path.exists(CUENTAS_FILE):
-        print(f"ERROR: No se encontró {CUENTAS_FILE}")
+        print(f"[ERROR] No se encontro {CUENTAS_FILE}")
         return {}, []
     
     accounts_data = {}
@@ -64,7 +64,6 @@ def load_accounts_from_txt():
                 user, pwd = line.split(':', 1)
                 accounts_data[user.strip()] = pwd.strip()
                 accounts_list.append(user.strip())
-    
     return accounts_data, accounts_list
 
 class CSVWriterThread(threading.Thread):
@@ -120,41 +119,99 @@ def load_existing_db():
         except Exception:
             pass
 
+# --- VALIDACION DE RED ---
+def check_proxy_connection(proxy_url):
+    """Prueba simple de conectividad a Bright Data."""
+    try:
+        proxies = {'http': proxy_url, 'https': proxy_url}
+        # Timeout estricto de 8s
+        requests.get("http://lumtest.com/myip.json", proxies=proxies, timeout=8, verify=False)
+        return True
+    except:
+        return False
+
+# --- LOGICA DE INICIO SIMPLIFICADA (IP FRESCA SIEMPRE) ---
 def init_session(username, password):
     if username in BANNED_ACCOUNTS: return None
 
-    # --- MODIFICACION CRITICA: Fail Fast ---
-    L = instaloader.Instaloader(
-        sleep=True,
-        user_agent="Instagram 200.0.0.30.120 Android (29/10; 420dpi; 1080x2130; Google/google; pixel 4; qcom; en_US; 320922800)",
-        max_connection_attempts=1, # Solo 1 intento para fallar rápido
-        request_timeout=20,
-        fatal_status_codes=[400, 401, 429, 403] # ESTO EVITA LA ESPERA DE 30 MIN
-    )
+    # Intentamos hasta 3 IPs aleatorias diferentes
+    for attempt in range(3):
+        
+        # SIEMPRE generamos una session ID nueva (IP Fresca)
+        session_id = str(random.randint(10000000, 99999999))
+        proxy_user_full = f"{PROXY_USER_BASE}-session-{session_id}"
+        proxy_url = f"http://{proxy_user_full}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
+        
+        print(f"[{username}] Probando IP Aleatoria ({session_id})...", end=" ")
 
-    session_id = hashlib.md5(username.encode()).hexdigest()[:8]
-    proxy_user_full = f"{PROXY_USER_BASE}-session-{session_id}"
-    proxy_url = f"http://{proxy_user_full}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
-    
-    L.context._session.proxies = {'http': proxy_url, 'https': proxy_url}
-    L.context._session.verify = False 
+        if not check_proxy_connection(proxy_url):
+            print("FALLO RED. Reintentando...")
+            continue # Siguiente IP
 
-    session_file = os.path.join(SESSION_DIR, f"{username}.session")
-    
-    try:
-        if os.path.exists(session_file):
-            L.load_session_from_file(username, filename=session_file)
-            print(f"[{username}] Sesión cargada.")
-        else:
-            print(f"[{username}] Creando nueva sesión (Login)...")
-            L.login(username, password)
+        print("RED OK. Conectando...")
+
+        L = instaloader.Instaloader(
+            sleep=True,
+            user_agent="Instagram 200.0.0.30.120 Android (29/10; 420dpi; 1080x2130; Google/google; pixel 4; qcom; en_US; 320922800)",
+            max_connection_attempts=1,
+            request_timeout=30,
+            fatal_status_codes=[400, 401, 429, 403]
+        )
+        
+        L.context._session.proxies = {'http': proxy_url, 'https': proxy_url}
+        L.context._session.verify = False 
+
+        session_file = os.path.join(SESSION_DIR, f"{username}.session")
+
+        try:
+            # Intentar cargar sesion guardada PRIMERO
+            # Nota: Al cambiar de IP, la sesion puede invalidarse, pero vale la pena intentar.
+            if os.path.exists(session_file) and attempt == 0:
+                try:
+                    L.load_session_from_file(username, filename=session_file)
+                    print(f"[{username}] Sesion cargada de disco.")
+                    return L
+                except:
+                    print(f"[{username}] Archivo sesion invalido.")
+
+            # Si no hay sesion o fallo carga, LOGIN desde cero
+            try:
+                # Pre-fetch cookies
+                L.context.get_json("https://www.instagram.com/data/shared_data/")
+            except: pass 
+
+            try:
+                L.login(username, password)
+            except instaloader.TwoFactorAuthRequiredException:
+                print(f"\n[2FA REQUERIDO] {username}")
+                print(f"IP: {session_id}")
+                
+                while True:
+                    code = input(f">> Codigo 2FA para {username}: ").strip()
+                    if not code: continue
+                    
+                    try:
+                        L.context.two_factor_login(code)
+                        L.save_session_to_file(filename=session_file)
+                        print(f"[{username}] 2FA Exitoso.")
+                        return L
+                    except Exception as e:
+                        if "Expecting value" in str(e) or "JSON" in str(e):
+                            raise Exception("Fallo Proxy 2FA")
+                        print(f"[ERROR] Codigo incorrecto: {e}")
+                        if input("Reintentar? (s/n): ").lower() != 's': return None
+
             L.save_session_to_file(filename=session_file)
             print(f"[{username}] Login OK.")
-    except Exception as e:
-        print(f"[{username}] ERROR INICIO: {e}")
-        return None
+            return L
 
-    return L
+        except Exception as e:
+            print(f"[{username}] Error intento {attempt+1}: {e}")
+            time.sleep(2)
+            continue
+
+    print(f"[{username}] Imposible conectar tras 3 intentos.")
+    return None
 
 def check_engagement_logic(L, profile):
     try:
@@ -169,21 +226,17 @@ def check_engagement_logic(L, profile):
     return (bad_posts / len(posts)) >= BAD_POSTS_PERCENTAGE, bad_posts, (bad_posts / len(posts))
 
 def kill_account(username):
-    """Elimina la cuenta de la memoria y del pool activo."""
     with POOL_LOCK:
         if username in ACCOUNTS_POOL:
             ACCOUNTS_POOL.remove(username)
-            print(f"\n[!!!] CUENTA ELIMINADA DEL POOL: {username}")
-    
+            print(f"\n[SISTEMA] CUENTA ELIMINADA: {username}")
     if username in SESSION_OBJECTS:
         del SESSION_OBJECTS[username]
 
 def worker_task(target_user, account_user):
     global PROCESSED_COUNT, SAVED_COUNT
     
-    if account_user not in SESSION_OBJECTS:
-        return
-
+    if account_user not in SESSION_OBJECTS: return
     L = SESSION_OBJECTS[account_user]
 
     try:
@@ -203,7 +256,6 @@ def worker_task(target_user, account_user):
 
     except (instaloader.ConnectionException, instaloader.LoginRequiredException, instaloader.QueryReturnedBadRequestException) as e:
         err = str(e)
-        # Ahora el 429 vendrá como excepción fatal, no como pausa
         if "401" in err or "429" in err or "wait" in err.lower() or "login" in err.lower() or "403" in err:
             kill_account(account_user)
             return 
@@ -212,15 +264,13 @@ def main():
     global ACCOUNTS_POOL
     load_existing_db()
     
-    # 1. Cargar cuentas
     ACCOUNTS_DATA, raw_accounts = load_accounts_from_txt()
     if not raw_accounts:
-        print("ERROR: Crea 'cuentas.txt'")
+        print("[ERROR] Crea 'cuentas.txt'")
         return
 
     print(f"--- Cargando {len(raw_accounts)} cuentas ---")
     
-    # Inicializar sesiones
     for acc in raw_accounts:
         l_instance = init_session(acc, ACCOUNTS_DATA[acc])
         if l_instance:
@@ -228,7 +278,7 @@ def main():
             ACCOUNTS_POOL.append(acc)
     
     if not ACCOUNTS_POOL: 
-        print("No hay cuentas válidas iniciadas.")
+        print("\n[ERROR FATAL] Ninguna cuenta pudo conectarse.")
         return
 
     total_workers = len(ACCOUNTS_POOL) * WORKERS_PER_ACCOUNT
@@ -237,61 +287,49 @@ def main():
     writer_thread = CSVWriterThread(CSV_FILENAME)
     writer_thread.start()
 
-    # --- LOGICA DE ELECCIÓN DE MAESTRO (MASTER ROTATION) ---
     followers_iter = None
-    
-    # Usamos una copia para iterar, permitiendo que kill_account modifique la original
     candidates_copy = list(ACCOUNTS_POOL)
 
     for candidate_master in candidates_copy:
         try:
-            print(f"Probando MAESTRO con: {candidate_master}...", end=" ")
+            print(f"Probando MAESTRO: {candidate_master}...", end=" ")
             L_candidate = SESSION_OBJECTS[candidate_master]
-            
             target_profile_obj = instaloader.Profile.from_username(L_candidate.context, TARGET_PROFILE)
-            
-            # Prueba de fuego: ID de usuario. 
-            # Si hay 429, fatal_status_codes lanzará excepción AQUÍ, sin esperar 30 mins.
             _ = target_profile_obj.userid 
-            
             followers_iter = target_profile_obj.get_followers()
             print(f"OK. ({target_profile_obj.followers} seguidores)")
-            break # Éxito
+            break 
         except Exception as e:
-            print(f"FALLÓ ({e}). Eliminando cuenta...")
+            print(f"FALLO ({e}). Eliminando...")
             kill_account(candidate_master)
 
     if followers_iter is None:
-        print("\n[CRITICO] TODAS las cuentas fallaron (Posible bloqueo masivo o IP quemada).")
+        print("\n[CRITICO] Todas las cuentas fallaron.")
         writer_thread.stop()
         return
 
-    # --- INICIO DE EJECUCIÓN PARALELA ---
     try:
         with ThreadPoolExecutor(max_workers=total_workers) as executor:
             while True:
                 with POOL_LOCK:
                     if not ACCOUNTS_POOL:
-                        print("\n\n[!!!] TODAS LAS CUENTAS MURIERON. DETENIENDO.")
+                        print("\n\n[SISTEMA] TODAS LAS CUENTAS MURIERON.")
                         break
                     current_pool = list(ACCOUNTS_POOL)
 
                 try:
                     follower = next(followers_iter)
-                    
                     if follower.username in SAVED_USERS: continue
                     
                     worker_acc = random.choice(current_pool)
                     executor.submit(worker_task, follower.username, worker_acc)
-                    
                     time.sleep(0.1)
 
                 except StopIteration:
-                    print("\n--- Fin de la lista de seguidores ---")
+                    print("\n--- Fin de lista ---")
                     break
                 except Exception as e:
                     print(f"\n[Error Maestro] {e}")
-                    # Si el maestro muere a mitad de camino, es más seguro parar
                     break
                     
     except KeyboardInterrupt:
