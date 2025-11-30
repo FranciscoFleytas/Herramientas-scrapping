@@ -3,24 +3,23 @@ import csv
 import os
 import threading
 import queue
+import hashlib 
 import random
+import json
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 import urllib3
 import instaloader
 
-# Desactivar advertencias SSL
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# --- CREDENCIALES BRIGHT DATA ---
+# CREDENCIALES BRIGHT DATA
 PROXY_HOST = "brd.superproxy.io"
 PROXY_PORT = "33335"
-PROXY_USER_BASE = "brd-customer-hl_23e53168-zone-scrapping_usser-country-ar"
-PROXY_PASS = "6p7y5qv5mz4q"
+PROXY_USER_BASE = "brd-customer-hl_23e53168-zone-residential_proxy1"
+PROXY_PASS = "ei0g975bijby"
 
-# --- CONFIGURACION ---
-TARGET_PROFILE = "rkcoaching__"
+# CONFIGURACION SCRAPING
+TARGET_PROFILE = "fin_newgen"
 MIN_FOLLOWERS = 100
 MIN_POSTS = 3
 ENGAGEMENT_THRESHOLD = 0.03
@@ -28,17 +27,16 @@ BAD_POSTS_PERCENTAGE = 0.7
 POSTS_TO_CHECK = 10
 WORKERS_PER_ACCOUNT = 1 
 
-# --- RUTAS ---
-try:
-    desktop = os.path.join(os.environ['USERPROFILE'], 'Desktop')
-except:
-    desktop = os.getcwd()
+# --- CONFIGURACION DE RUTAS (DINAMICA) ---
+# Obtiene la ruta exacta donde esta guardado este script
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CUENTAS_FILE = os.path.join(desktop, 'cuentas.txt')
-CSV_FILENAME = os.path.join(desktop, f'leads_bajo_engagement_{TARGET_PROFILE}.csv')
-SESSION_DIR = desktop 
+CUENTAS_FILE = os.path.join(SCRIPT_DIR, 'cuentas.txt')
+CERT_FILE = os.path.join(SCRIPT_DIR, 'brightdata_ca.crt')
+CSV_FILENAME = os.path.join(SCRIPT_DIR, f'leads_bajo_engagement_{TARGET_PROFILE}.csv')
+SESSION_DIR = SCRIPT_DIR 
 
-# --- GLOBALES ---
+# GLOBALES
 STATS_LOCK = threading.Lock()
 POOL_LOCK = threading.Lock() 
 SESSION_OBJECTS = {} 
@@ -51,7 +49,7 @@ SAVED_COUNT = 0
 
 def load_accounts_from_txt():
     if not os.path.exists(CUENTAS_FILE):
-        print(f"[ERROR] No se encontro {CUENTAS_FILE}")
+        print(f"[ERROR] No se encontro {CUENTAS_FILE} en la carpeta del script.")
         return {}, []
     
     accounts_data = {}
@@ -61,9 +59,13 @@ def load_accounts_from_txt():
         for line in f:
             line = line.strip()
             if ':' in line:
-                user, pwd = line.split(':', 1)
-                accounts_data[user.strip()] = pwd.strip()
-                accounts_list.append(user.strip())
+                parts = line.split(':')
+                user = parts[0].strip()
+                pwd = parts[1].strip()
+                backup_code = parts[2].strip() if len(parts) > 2 else None
+                
+                accounts_data[user] = {'pass': pwd, 'backup_code': backup_code}
+                accounts_list.append(user)
     return accounts_data, accounts_list
 
 class CSVWriterThread(threading.Thread):
@@ -119,34 +121,37 @@ def load_existing_db():
         except Exception:
             pass
 
-# --- VALIDACION DE RED ---
 def check_proxy_connection(proxy_url):
-    """Prueba simple de conectividad a Bright Data."""
     try:
         proxies = {'http': proxy_url, 'https': proxy_url}
-        # Timeout estricto de 8s
-        requests.get("http://lumtest.com/myip.json", proxies=proxies, timeout=8, verify=False)
+        verify_ssl = CERT_FILE if os.path.exists(CERT_FILE) else False
+        requests.get("https://lumtest.com/myip.json", proxies=proxies, timeout=8, verify=verify_ssl)
         return True
-    except:
+    except Exception:
         return False
 
-# --- LOGICA DE INICIO SIMPLIFICADA (IP FRESCA SIEMPRE) ---
-def init_session(username, password):
+def init_session(username, account_details):
     if username in BANNED_ACCOUNTS: return None
+    
+    password = account_details['pass']
+    backup_code_static = account_details['backup_code']
 
-    # Intentamos hasta 3 IPs aleatorias diferentes
+    # Verificar certificado
+    if not os.path.exists(CERT_FILE):
+        ssl_context = False 
+    else:
+        ssl_context = CERT_FILE
+
     for attempt in range(3):
-        
-        # SIEMPRE generamos una session ID nueva (IP Fresca)
         session_id = str(random.randint(10000000, 99999999))
         proxy_user_full = f"{PROXY_USER_BASE}-session-{session_id}"
         proxy_url = f"http://{proxy_user_full}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
         
-        print(f"[{username}] Probando IP Aleatoria ({session_id})...", end=" ")
+        print(f"[{username}] Probando IP ({session_id})...", end=" ")
 
         if not check_proxy_connection(proxy_url):
             print("FALLO RED. Reintentando...")
-            continue # Siguiente IP
+            continue
 
         print("RED OK. Conectando...")
 
@@ -159,13 +164,11 @@ def init_session(username, password):
         )
         
         L.context._session.proxies = {'http': proxy_url, 'https': proxy_url}
-        L.context._session.verify = False 
+        L.context._session.verify = ssl_context 
 
         session_file = os.path.join(SESSION_DIR, f"{username}.session")
 
         try:
-            # Intentar cargar sesion guardada PRIMERO
-            # Nota: Al cambiar de IP, la sesion puede invalidarse, pero vale la pena intentar.
             if os.path.exists(session_file) and attempt == 0:
                 try:
                     L.load_session_from_file(username, filename=session_file)
@@ -174,9 +177,7 @@ def init_session(username, password):
                 except:
                     print(f"[{username}] Archivo sesion invalido.")
 
-            # Si no hay sesion o fallo carga, LOGIN desde cero
             try:
-                # Pre-fetch cookies
                 L.context.get_json("https://www.instagram.com/data/shared_data/")
             except: pass 
 
@@ -184,22 +185,29 @@ def init_session(username, password):
                 L.login(username, password)
             except instaloader.TwoFactorAuthRequiredException:
                 print(f"\n[2FA REQUERIDO] {username}")
-                print(f"IP: {session_id}")
                 
-                while True:
-                    code = input(f">> Codigo 2FA para {username}: ").strip()
-                    if not code: continue
+                code_to_use = None
+                if backup_code_static:
+                    print(f"[{username}] Usando Codigo de Respaldo del TXT.")
+                    code_to_use = backup_code_static
+                else:
+                    code_to_use = input(f">> Ingresa codigo manual: ").strip()
+                
+                try:
+                    L.context.two_factor_login(code_to_use)
+                    L.save_session_to_file(filename=session_file)
+                    print(f"[{username}] 2FA Exitoso.")
+                    return L
+                except Exception as e:
+                    if "Expecting value" in str(e) or "JSON" in str(e) or "Connection" in str(e):
+                        raise Exception("Fallo Proxy 2FA")
                     
-                    try:
-                        L.context.two_factor_login(code)
-                        L.save_session_to_file(filename=session_file)
-                        print(f"[{username}] 2FA Exitoso.")
-                        return L
-                    except Exception as e:
-                        if "Expecting value" in str(e) or "JSON" in str(e):
-                            raise Exception("Fallo Proxy 2FA")
-                        print(f"[ERROR] Codigo incorrecto: {e}")
-                        if input("Reintentar? (s/n): ").lower() != 's': return None
+                    print(f"[ERROR] Codigo rechazado: {e}")
+                    if backup_code_static:
+                        print(f"[{username}] El codigo del TXT fallo.")
+                        return None 
+                    
+                    if input("Reintentar manual? (s/n): ").lower() != 's': return None
 
             L.save_session_to_file(filename=session_file)
             print(f"[{username}] Login OK.")
@@ -266,8 +274,12 @@ def main():
     
     ACCOUNTS_DATA, raw_accounts = load_accounts_from_txt()
     if not raw_accounts:
-        print("[ERROR] Crea 'cuentas.txt'")
+        print("[ERROR] Crea 'cuentas.txt' en la misma carpeta que el script.")
         return
+
+    if not os.path.exists(CERT_FILE):
+        print(f"[ADVERTENCIA] No se encontro 'brightdata_ca.crt' en: {SCRIPT_DIR}")
+        print("La conexion sera insegura y propensa a fallos.\n")
 
     print(f"--- Cargando {len(raw_accounts)} cuentas ---")
     
