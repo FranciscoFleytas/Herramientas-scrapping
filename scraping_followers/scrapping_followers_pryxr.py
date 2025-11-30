@@ -18,7 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # --- CREDENCIALES BRIGHT DATA ---
 PROXY_HOST = "brd.superproxy.io"
 PROXY_PORT = "33335"
-PROXY_USER_BASE = "brd-customer-hl_23e53168-zone-residential_proxy1"
+PROXY_USER_BASE = "brd-customer-hl_23e53168-zone-residential_proxy1-country-ar" 
 PROXY_PASS = "ei0g975bijby"
 
 # --- CONFIGURACION ---
@@ -31,7 +31,7 @@ POSTS_TO_CHECK = 10
 WORKERS_PER_ACCOUNT = 1 
 
 # --- PAISES PARA ROTACION ---
-PROXY_COUNTRIES = ['us', 'gb', 'es', 'fr', 'de', 'it']
+PROXY_COUNTRIES = ['us']
 
 # --- RUTAS ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
