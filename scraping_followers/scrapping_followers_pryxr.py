@@ -27,9 +27,9 @@ USER_AGENTS_MAPPING = {
 DEFAULT_UA = "Instagram 200.0.0.30.120 Android (29/10; 420dpi; 1080x2130; Google/google; pixel 4; qcom; en_US; 320922800)"
 
 # --- CONFIGURACION DE FILTRADO ---
-TARGET_PROFILE = "angelica_feminine_healer" 
+TARGET_PROFILE = "maradorne" 
 MIN_FOLLOWERS = 10000   
-MIN_POSTS = 20          
+MIN_POSTS = 100          
 POSTS_TO_CHECK = 0      
 WORKERS_PER_ACCOUNT = 1 
 
