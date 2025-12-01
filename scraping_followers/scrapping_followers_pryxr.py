@@ -7,7 +7,6 @@ import hashlib
 import random
 import requests
 from concurrent.futures import ThreadPoolExecutor
-from itertools import islice, cycle 
 import urllib3
 import instaloader
 
@@ -27,26 +26,27 @@ USER_AGENTS_MAPPING = {
 }
 DEFAULT_UA = "Instagram 200.0.0.30.120 Android (29/10; 420dpi; 1080x2130; Google/google; pixel 4; qcom; en_US; 320922800)"
 
-# --- CONFIGURACION DE PRODUCCION ---
-TEST_MODE_SAVE_ALL = False
-TARGET_PROFILE = "imthatquez" 
-MIN_FOLLOWERS = 2000    
-MIN_POSTS = 20         
-ENGAGEMENT_THRESHOLD = 0.03
-BAD_POSTS_PERCENTAGE = 0.60 
-POSTS_TO_CHECK = 10      
-WORKERS_PER_ACCOUNT = 1
+# --- CONFIGURACION DE FILTRADO ---
+TARGET_PROFILE = "angelica_feminine_healer" 
+MIN_FOLLOWERS = 10000   
+MIN_POSTS = 20          
+POSTS_TO_CHECK = 0      
+WORKERS_PER_ACCOUNT = 1 
+
+# --- CONFIGURACION DE ENFRIAMIENTO (NUEVO) ---
+COOLDOWN_MINUTES = 60  # Tiempo que descansa una cuenta si recibe advertencia
 
 # --- RUTAS ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+user_home = os.path.expanduser("~")
+DESKTOP_DIR = os.path.join(user_home, "Desktop")
 
-# Optimización: Detección universal del escritorio (Win/Mac/Linux)
-DESKTOP_DIR = os.path.join(os.path.expanduser("~"), "Desktop")
+if not os.path.exists(DESKTOP_DIR):
+    DESKTOP_DIR = SCRIPT_DIR
 
 CUENTAS_FILE = os.path.join(SCRIPT_DIR, 'cuentas.txt')
-# Archivo para recordar usuarios ya analizados (Guardados + Descartados)
 HISTORY_FILE = os.path.join(SCRIPT_DIR, f'history_{TARGET_PROFILE}.txt')
-CSV_FILENAME = os.path.join(DESKTOP_DIR, f'leads_{TARGET_PROFILE}.csv')
+CSV_FILENAME = os.path.join(DESKTOP_DIR, f'leads_big_accounts_{TARGET_PROFILE}_SEGUIDOS.csv')
 SESSION_DIR = SCRIPT_DIR
 PROXY_COUNTRIES = ['us']
 
@@ -54,9 +54,10 @@ PROXY_COUNTRIES = ['us']
 STATS_LOCK = threading.Lock()
 POOL_LOCK = threading.Lock() 
 SESSION_OBJECTS = {} 
-ACCOUNTS_POOL = [] 
+ACCOUNTS_POOL = [] # Lista simple de usuarios
+COOLDOWN_DICT = {} # {usuario: timestamp_liberacion}
 BANNED_ACCOUNTS = set()
-VISITED_USERS = set() # Set en memoria para O(1) lookup
+VISITED_USERS = set() 
 WRITE_QUEUE = queue.Queue()
 PROCESSED_COUNT = 0
 SAVED_COUNT = 0
@@ -81,9 +82,7 @@ def load_accounts_from_txt():
                 accounts_list.append(user)
     return accounts_data, accounts_list
 
-# --- GESTION DE HISTORIAL ---
 def load_history():
-    """Carga usuarios ya analizados para no repetir trabajo."""
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             for line in f:
@@ -91,7 +90,6 @@ def load_history():
         print(f"Historial cargado: {len(VISITED_USERS)} usuarios ya ignorados.")
 
 def save_visit_async(username):
-    """Guarda usuario en historial sin bloquear el hilo principal."""
     try:
         with open(HISTORY_FILE, 'a', encoding='utf-8') as f:
             f.write(f"{username}\n")
@@ -115,7 +113,7 @@ class CSVWriterThread(threading.Thread):
                 with open(self.filename, mode, newline='', encoding='utf-8-sig') as f:
                     writer = csv.writer(f, delimiter=';')
                     if mode == 'w':
-                        writer.writerow(["Usuario", "URL", "Seguidores", "Posts Analizados", "Posts Malos", "Ratio Fallo"])
+                        writer.writerow(["Usuario", "URL", "Seguidores", "Publicaciones", "Estado"])
                     
                     count = 0
                     while not WRITE_QUEUE.empty() and count < 50:
@@ -126,9 +124,6 @@ class CSVWriterThread(threading.Thread):
                             count += 1
                     f.flush()
                     os.fsync(f.fileno()) 
-            except PermissionError:
-                print(f"[ERROR] Cierra el CSV para guardar datos.")
-                time.sleep(2)
             except Exception:
                 time.sleep(1)
 
@@ -175,7 +170,7 @@ def init_session(username, account_details):
         print("OK.")
 
         L = instaloader.Instaloader(
-            sleep=True, 
+            sleep=False, 
             user_agent=my_ua,
             max_connection_attempts=1,
             request_timeout=30,
@@ -223,72 +218,131 @@ def init_session(username, account_details):
             continue
     return None
 
-def check_engagement_logic(L, profile):
-    try:
-        posts = list(islice(profile.get_posts(), POSTS_TO_CHECK))
-    except Exception:
-        return False, 0, 0
-    
-    # Optimización: Evitar división por cero
-    if not posts or len(posts) == 0: 
-        return False, 0, 0
+# --- FUNCIONES DE GESTION DE CUENTAS (SMART POOL) ---
 
-    min_likes = profile.followers * ENGAGEMENT_THRESHOLD
-    bad_posts = sum(1 for p in posts if p.likes < min_likes)
-    return (bad_posts / len(posts)) >= BAD_POSTS_PERCENTAGE, bad_posts, (bad_posts / len(posts))
+def freeze_account(username):
+    """Pone la cuenta en el congelador temporalmente."""
+    release_time = time.time() + (COOLDOWN_MINUTES * 60)
+    with POOL_LOCK:
+        COOLDOWN_DICT[username] = release_time
+        print(f"\n[ENFRIAMIENTO] {username} pausada por {COOLDOWN_MINUTES} min (Error temp).")
 
-def kill_account(username):
+def kill_account_permanent(username):
+    """Elimina la cuenta definitivamente (Credenciales malas)."""
     with POOL_LOCK:
         if username in ACCOUNTS_POOL:
             ACCOUNTS_POOL.remove(username)
+        if username in COOLDOWN_DICT:
+            del COOLDOWN_DICT[username]
     if username in SESSION_OBJECTS:
         del SESSION_OBJECTS[username]
+    print(f"\n[FATAL] Cuenta {username} eliminada permanentemente.")
+
+def get_next_available_account():
+    """Busca una cuenta viva que no esté en enfriamiento. Si todas descansan, duerme."""
+    while True:
+        with POOL_LOCK:
+            # 1. Si no hay cuentas vivas en total, fin del juego.
+            if not ACCOUNTS_POOL:
+                return None
+            
+            # 2. Revisar si alguien salió del enfriamiento
+            now = time.time()
+            accounts_to_release = []
+            for acc, release_ts in COOLDOWN_DICT.items():
+                if now >= release_ts:
+                    accounts_to_release.append(acc)
+            
+            for acc in accounts_to_release:
+                del COOLDOWN_DICT[acc]
+                print(f"[RECUPERADA] {acc} vuelve al trabajo.")
+
+            # 3. Buscar candidatos disponibles
+            candidates = [acc for acc in ACCOUNTS_POOL if acc not in COOLDOWN_DICT]
+
+            if candidates:
+                # Rotación simple (toma el primero y lo manda al final para Round Robin)
+                chosen = candidates[0]
+                ACCOUNTS_POOL.remove(chosen)
+                ACCOUNTS_POOL.append(chosen)
+                return chosen
+            
+            # 4. Si no hay candidatos, calcular tiempo de espera
+            if COOLDOWN_DICT:
+                next_release = min(COOLDOWN_DICT.values())
+                sleep_seconds = next_release - now
+                if sleep_seconds < 0: sleep_seconds = 1
+            else:
+                return None # Should not happen if pool not empty
+
+        # Si llegamos aquí, es que hay cuentas pero todas duermen.
+        print(f"[SISTEMA PAUSADO] Esperando {int(sleep_seconds)}s a que se recuperen cuentas...", end='\r')
+        time.sleep(sleep_seconds + 1) # Dormir y reintentar loop
+
+# ----------------------------------------------------
 
 def worker_task(target_user, account_user):
     global PROCESSED_COUNT, SAVED_COUNT
     
-    if account_user not in SESSION_OBJECTS: return
-    L = SESSION_OBJECTS[account_user]
+    with POOL_LOCK:
+        if account_user in COOLDOWN_DICT: return
+
+    L = SESSION_OBJECTS.get(account_user)
+    if not L: return
 
     try:
-        time.sleep(random.uniform(1.0, 3.0)) 
+        # Pausa leve
+        time.sleep(random.uniform(3.0, 6.0)) 
 
         profile = instaloader.Profile.from_username(L.context, target_user)
         
+        # Filtros rápidos
         if profile.is_private: return
-        if profile.followers < MIN_FOLLOWERS: return
-        if profile.mediacount < MIN_POSTS: return
 
-        is_lead, bad_count, ratio = check_engagement_logic(L, profile)
+        # Si descartamos, usamos \r para que se sobrescriba (ahorra espacio visual)
+        if profile.followers < MIN_FOLLOWERS: 
+            VISITED_USERS.add(target_user)
+            save_visit_async(target_user)
+            with STATS_LOCK:
+                PROCESSED_COUNT += 1
+                # Mensaje efímero (se borra con el siguiente)
+                print(f"[{PROCESSED_COUNT}|{SAVED_COUNT}] {target_user:<15} | < Followers | DESCARTADO", end='\r')
+            return
 
-        should_save = is_lead or TEST_MODE_SAVE_ALL 
+        if profile.mediacount < MIN_POSTS:
+            VISITED_USERS.add(target_user)
+            save_visit_async(target_user)
+            with STATS_LOCK:
+                PROCESSED_COUNT += 1
+                # Mensaje efímero
+                print(f"[{PROCESSED_COUNT}|{SAVED_COUNT}] {target_user:<15} | < Posts     | DESCARTADO", end='\r')
+            return
+
+        # --- SI LLEGA AQUI, ES UN LEAD ---
         
-        if should_save:
-            status_msg = "GUARDADO"
-        else:
-            status_msg = f"DESCARTADO ({bad_count}/{POSTS_TO_CHECK})"
-        
-        with STATS_LOCK:
-            PROCESSED_COUNT += 1
-            print(f"[{PROCESSED_COUNT}|{SAVED_COUNT}] {target_user:<15} | Ratio: {ratio:.2f} | {status_msg}", end='\r')
-
-        # Guardamos en historial SIEMPRE, sea bueno o malo
         VISITED_USERS.add(target_user)
         save_visit_async(target_user)
 
-        if should_save:
-            url = f"https://instagram.com/{target_user}"
-            WRITE_QUEUE.put([target_user, url, profile.followers, POSTS_TO_CHECK, bad_count, f"{ratio:.2f}"])
-            with STATS_LOCK: SAVED_COUNT += 1
+        url = f"https://instagram.com/{target_user}"
+        WRITE_QUEUE.put([target_user, url, profile.followers, profile.mediacount, "CUMPLE REQ"])
+        
+        with STATS_LOCK: 
+            SAVED_COUNT += 1
+            PROCESSED_COUNT += 1
+            # Mensaje FIJO (sin \r) para que quede registrado visualmente en la consola
+            print(f"[{PROCESSED_COUNT}|{SAVED_COUNT}] {target_user:<15} | F:{profile.followers} P:{profile.mediacount} | >>> GUARDADO <<<")
 
     except Exception as e:
         err = str(e)
-        if "401" in err or "429" in err or "login" in err.lower():
-            kill_account(account_user)
+        # Ahora que sleep=False, los errores 429 caerán aquí inmediatamente
+        if "401" in err or "429" in err or "wait" in err.lower() or "too many queries" in err.lower():
+            freeze_account(account_user)
+        elif "login" in err.lower() or "challenge" in err.lower():
+            freeze_account(account_user)
 
 def main():
     global ACCOUNTS_POOL
-    load_history() # Carga previa de historial
+    load_history() 
     
     ACCOUNTS_DATA, raw_accounts = load_accounts_from_txt()
     if not raw_accounts: return
@@ -306,52 +360,67 @@ def main():
         print("\n[ERROR] Sin cuentas activas.")
         return
 
-    total_workers = len(ACCOUNTS_POOL) * WORKERS_PER_ACCOUNT
-    print(f"\n>>> INICIANDO SCRAPING ({total_workers} Workers) <<<")
+    print(f"\n>>> INICIANDO SCRAPING DE SEGUIDOS CON SMART POOL <<<")
 
     writer_thread = CSVWriterThread(CSV_FILENAME)
     writer_thread.start()
 
-    pool_cycle = cycle(ACCOUNTS_POOL)
-    followers_iter = None
-    
-    for candidate in list(ACCOUNTS_POOL):
-        try:
-            L_candidate = SESSION_OBJECTS[candidate]
-            target = instaloader.Profile.from_username(L_candidate.context, TARGET_PROFILE)
-            followers_iter = target.get_followers()
-            print(f"Maestro: {candidate} -> Target: {TARGET_PROFILE} ({target.followers} followers)")
-            break 
-        except:
-            kill_account(candidate)
-
-    if not followers_iter: return
-
     try:
-        with ThreadPoolExecutor(max_workers=total_workers) as executor:
-            while True:
-                with POOL_LOCK:
-                    if not ACCOUNTS_POOL: break
-                    worker_acc = next(pool_cycle)
-                    while worker_acc not in SESSION_OBJECTS:
-                        worker_acc = next(pool_cycle)
-                        if not ACCOUNTS_POOL: break
+        # Bucle principal de Maestros
+        while True:
+            current_master = get_next_available_account()
+            
+            if not current_master:
+                print("\n[FATAL] No quedan cuentas operativas.")
+                break
 
-                try:
-                    follower = next(followers_iter)
-                    
-                    # VALIDACION DE HISTORIAL
-                    if follower.username in VISITED_USERS: 
-                        continue
-                    
-                    executor.submit(worker_task, follower.username, worker_acc)
-                    time.sleep(random.uniform(0.5, 2.0))
+            print(f"\n[MAESTRO ACTIVO]: {current_master}")
 
-                except StopIteration:
-                    break
-                except Exception:
-                    time.sleep(5)
-                    
+            try:
+                L_master = SESSION_OBJECTS[current_master]
+                target = instaloader.Profile.from_username(L_master.context, TARGET_PROFILE)
+                
+                print(f"Obteniendo lista de SEGUIDOS de {TARGET_PROFILE}...")
+                followees_iter = target.get_followees()
+                
+                with ThreadPoolExecutor(max_workers=len(ACCOUNTS_POOL)) as executor:
+                    for followee in followees_iter:
+                        
+                        # --- SELECCION DINAMICA DE WORKER ---
+                        worker_acc = get_next_available_account()
+                        
+                        if not worker_acc:
+                            print("[CRITICO] Pool vacío durante ejecución.")
+                            break # Rompe loop de seguidores para intentar recuperar cuentas arriba
+
+                        # --- RETOMAR ---
+                        if followee.username in VISITED_USERS:
+                            if len(VISITED_USERS) % 200 == 0:
+                                print(f"[INFO] Saltando usuarios ya visitados...", end='\r')
+                            continue
+                        
+                        executor.submit(worker_task, followee.username, worker_acc)
+                        time.sleep(random.uniform(0.3, 0.8))
+                
+                print("\n--- LISTA DE SEGUIDOS COMPLETADA ---")
+                break
+
+            except KeyboardInterrupt:
+                raise
+
+            except Exception as e:
+                err = str(e)
+                print(f"\n[ERROR MAESTRO] {current_master}: {err}")
+                
+                if "429" in err or "401" in err or "wait" in err.lower():
+                    freeze_account(current_master)
+                else:
+                    # Si es error grave desconocido, congelamos por seguridad
+                    freeze_account(current_master)
+                
+                print(">>> Rotando maestro...\n")
+                time.sleep(2)
+
     except KeyboardInterrupt:
         print("\nDeteniendo...")
     finally:

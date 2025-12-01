@@ -2,9 +2,9 @@ import instaloader
 import os
 
 # --- CONFIGURACIÓN ---
-MY_USER = "nurtipofyo"
+MY_USER = "ffra.nciflee"
 # Copia el sessionid fresco desde el navegador (F12 > Application > Cookies)
-SESSION_ID = "79016136573%3ALDU8UMEaBSEabD%3A10%3AAYgNg06n7lCYO35tJluLO4jV16c7O6JmPzb27MixHw" 
+SESSION_ID = "78980491601%3Ale5S7GTOmo8Dzi%3A18%3AAYiEfBWKoLnZtazZDpJRvb6SvLcSWB_RdIw5fD2muQ" 
 # User Agent genérico de Windows para evitar bloqueo por dispositivo desconocido
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
