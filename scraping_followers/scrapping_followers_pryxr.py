@@ -8,7 +8,7 @@ import random
 import json
 import requests
 from concurrent.futures import ThreadPoolExecutor
-from itertools import islice
+from itertools import islice, cycle 
 import urllib3
 import instaloader
 
@@ -21,13 +21,23 @@ PROXY_PORT = "33335"
 PROXY_USER_BASE = "brd-customer-hl_23e53168-zone-residential_proxy1-country-ar" 
 PROXY_PASS = "ei0g975bijby"
 
-# --- CONFIGURACION ---
+# --- CONFIGURACION DE SEGURIDAD ---
+USER_AGENTS_MAPPING = {
+    "fabiangoltra44": "Instagram 219.0.0.12.117 Android (31/12; 480dpi; 1080x2400; Xiaomi; M2007J20CG; surya; qcom; en_US; 368526978)",
+    "franciflee": "Instagram 265.0.0.19.301 iPhone14,2; iOS 16.1; en_US; en-US; scale=3.00; 1170x2532; 418526978"
+}
+DEFAULT_UA = "Instagram 200.0.0.30.120 Android (29/10; 420dpi; 1080x2130; Google/google; pixel 4; qcom; en_US; 320922800)"
+
+# --- CONFIGURACION PARA PRUEBA DE CSV ---
+# ATENCION: Esto guardará a TODOS los usuarios para verificar que el archivo se crea.
+TEST_MODE_SAVE_ALL = True 
+
 TARGET_PROFILE = "rkcoaching__"
-MIN_FOLLOWERS = 100
-MIN_POSTS = 3
+MIN_FOLLOWERS = 0       # Aceptamos todo para prueba
+MIN_POSTS = 1           
 ENGAGEMENT_THRESHOLD = 0.03
 BAD_POSTS_PERCENTAGE = 0.7
-POSTS_TO_CHECK = 10
+POSTS_TO_CHECK = 3      # Solo 3 posts para ir rápido
 WORKERS_PER_ACCOUNT = 1 
 
 # --- PAISES PARA ROTACION ---
@@ -36,7 +46,8 @@ PROXY_COUNTRIES = ['us']
 # --- RUTAS ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CUENTAS_FILE = os.path.join(SCRIPT_DIR, 'cuentas.txt')
-CSV_FILENAME = os.path.join(SCRIPT_DIR, f'leads_bajo_engagement_{TARGET_PROFILE}.csv')
+# Nombre del archivo incluye "_TEST" para diferenciarlo
+CSV_FILENAME = os.path.join(SCRIPT_DIR, f'leads_bajo_engagement_{TARGET_PROFILE}_TEST.csv')
 SESSION_DIR = SCRIPT_DIR 
 
 # --- GLOBALES ---
@@ -52,7 +63,7 @@ SAVED_COUNT = 0
 
 def load_accounts_from_txt():
     if not os.path.exists(CUENTAS_FILE):
-        print(f"[ERROR] No se encontro {CUENTAS_FILE}")
+        print(f"[ERROR] No se encontró 'cuentas.txt' en: {SCRIPT_DIR}")
         return {}, []
     
     accounts_data = {}
@@ -81,7 +92,7 @@ class CSVWriterThread(threading.Thread):
         while self.running:
             try:
                 if WRITE_QUEUE.empty():
-                    time.sleep(1)
+                    time.sleep(0.5)
                     continue
 
                 mode = 'a' if os.path.exists(self.filename) else 'w'
@@ -99,10 +110,10 @@ class CSVWriterThread(threading.Thread):
                             WRITE_QUEUE.task_done()
                             count += 1
                     f.flush()
-                    os.fsync(f.fileno())
+                    os.fsync(f.fileno()) # Forzar escritura a disco
             except PermissionError:
-                print(f"[ERROR] Excel abierto. Cerrar para guardar.")
-                time.sleep(5)
+                print(f"[ERROR] Cierra el archivo CSV para poder guardar datos.")
+                time.sleep(2)
             except Exception:
                 time.sleep(1)
 
@@ -131,16 +142,14 @@ def check_proxy_connection(proxy_url):
     except Exception:
         return False
 
-# --- LOGICA DE INICIO CON GESTION DE COOKIES Y HEADERS ---
 def init_session(username, account_details):
     if username in BANNED_ACCOUNTS: return None
     
     password = account_details['pass']
     backup_code_static = account_details['backup_code']
+    my_ua = USER_AGENTS_MAPPING.get(username, DEFAULT_UA)
 
-    # Cabeceras para simular navegador real y forzar entrega de CSRF
     BASE_HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
@@ -155,31 +164,28 @@ def init_session(username, account_details):
     for attempt in range(4):
         session_id = str(random.randint(10000000, 99999999))
         country_code = PROXY_COUNTRIES[attempt % len(PROXY_COUNTRIES)]
-        
         proxy_user_full = f"{PROXY_USER_BASE}-country-{country_code}-session-{session_id}"
         proxy_url = f"http://{proxy_user_full}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
         
-        print(f"[{username}] IP: {country_code.upper()} ({session_id})...", end=" ")
+        print(f"[{username}] IP: {country_code.upper()}... ", end="")
 
         if not check_proxy_connection(proxy_url):
-            print("FALLO RED. Rotando...")
+            print("X")
             continue
+        print("OK.")
 
-        print("OK. Conectando...")
-
-        # Configuracion de Instaloader
         L = instaloader.Instaloader(
-            sleep=True,
-            user_agent=BASE_HEADERS['User-Agent'],
+            sleep=True, 
+            user_agent=my_ua,
             max_connection_attempts=1,
             request_timeout=30,
             fatal_status_codes=[400, 401, 429, 403]
         )
         
-        # Inyeccion de Proxy y Headers
         L.context._session.proxies = {'http': proxy_url, 'https': proxy_url}
         L.context._session.verify = False 
         L.context._session.headers.update(BASE_HEADERS)
+        L.context._session.headers.update({"User-Agent": my_ua})
 
         session_file = os.path.join(SESSION_DIR, f"{username}.session")
 
@@ -187,61 +193,36 @@ def init_session(username, account_details):
             if os.path.exists(session_file) and attempt == 0:
                 try:
                     L.load_session_from_file(username, filename=session_file)
-                    print(f"[{username}] Sesion cargada de disco.")
+                    print(f"[{username}] Sesión cargada.")
                     return L
                 except:
-                    print(f"[{username}] Sesion invalida.")
+                    print(f"[{username}] Sesión inválida.")
 
-            # --- VALIDACION CSRF TOKEN ---
             try:
-                # Peticion GET inicial para obtener cookies
-                resp = L.context._session.get("https://www.instagram.com/", timeout=15)
-                
-                # Busqueda manual del token en el jar de cookies
-                token_found = False
-                for cookie in L.context._session.cookies:
-                    if cookie.name == 'csrftoken':
-                        token_found = True
-                        break
-                
-                if not token_found:
-                    print(f"[{username}] Error: Servidor no envio csrftoken (IP Bloqueada). Status: {resp.status_code}")
-                    continue # Rotar IP inmediatamente
-            
-            except Exception as e:
-                print(f"[{username}] Error conexion inicial: {e}")
-                continue
+                L.context._session.get("https://www.instagram.com/", timeout=15)
+            except: pass
 
-            # Login
             try:
                 L.login(username, password)
             except instaloader.TwoFactorAuthRequiredException:
-                print(f"\n[2FA REQUERIDO] {username}")
-                
-                code_to_use = backup_code_static if backup_code_static else input(f">> Codigo manual: ").strip()
-                
+                print(f"\n[2FA] {username}")
+                code_to_use = backup_code_static if backup_code_static else input(f">> Código: ").strip()
                 try:
                     L.context.two_factor_login(code_to_use)
                     L.save_session_to_file(filename=session_file)
-                    print(f"[{username}] 2FA Exitoso.")
+                    print(f"[{username}] 2FA OK.")
                     return L
-                except Exception as e:
-                    if "Expecting value" in str(e) or "JSON" in str(e):
-                        raise Exception("Fallo Proxy 2FA")
-                    
-                    print(f"[ERROR] Codigo rechazado: {e}")
-                    if backup_code_static or input("Reintentar manual? (s/n): ").lower() != 's': return None
+                except Exception:
+                    return None
 
             L.save_session_to_file(filename=session_file)
             print(f"[{username}] Login OK.")
             return L
 
-        except Exception as e:
-            print(f"[{username}] Error intento {attempt+1}: {e}")
-            time.sleep(2)
+        except Exception:
+            time.sleep(1)
             continue
 
-    print(f"[{username}] Imposible conectar tras 4 intentos.")
     return None
 
 def check_engagement_logic(L, profile):
@@ -260,7 +241,6 @@ def kill_account(username):
     with POOL_LOCK:
         if username in ACCOUNTS_POOL:
             ACCOUNTS_POOL.remove(username)
-            print(f"\n[SISTEMA] CUENTA ELIMINADA: {username}")
     if username in SESSION_OBJECTS:
         del SESSION_OBJECTS[username]
 
@@ -271,34 +251,38 @@ def worker_task(target_user, account_user):
     L = SESSION_OBJECTS[account_user]
 
     try:
+        time.sleep(random.uniform(0.5, 1.5)) # Rapido para prueba
+
         profile = instaloader.Profile.from_username(L.context, target_user)
-        if profile.is_private or profile.followers < MIN_FOLLOWERS: return
+        if profile.is_private: return
 
         is_lead, bad_count, ratio = check_engagement_logic(L, profile)
 
+        # --- LOGICA DE GUARDADO MODIFICADA PARA PRUEBA ---
+        should_save = is_lead or TEST_MODE_SAVE_ALL 
+        
+        status_msg = "GUARDADO (TEST)" if should_save else "DESCARTADO"
+        
         with STATS_LOCK:
             PROCESSED_COUNT += 1
-            print(f"[{PROCESSED_COUNT}|{SAVED_COUNT}] {target_user:<15} | Ratio: {ratio:.2f}", end='\r')
+            print(f"[{PROCESSED_COUNT}|{SAVED_COUNT}] {target_user:<15} | Ratio: {ratio:.2f} | {status_msg}", end='\r')
 
-        if is_lead:
+        if should_save:
             url = f"https://instagram.com/{target_user}"
             WRITE_QUEUE.put([target_user, url, profile.followers, POSTS_TO_CHECK, bad_count, f"{ratio:.2f}"])
             with STATS_LOCK: SAVED_COUNT += 1
 
-    except (instaloader.ConnectionException, instaloader.LoginRequiredException, instaloader.QueryReturnedBadRequestException) as e:
+    except Exception as e:
         err = str(e)
-        if "401" in err or "429" in err or "wait" in err.lower() or "login" in err.lower() or "403" in err:
+        if "401" in err or "429" in err or "login" in err.lower():
             kill_account(account_user)
-            return 
 
 def main():
     global ACCOUNTS_POOL
     load_existing_db()
     
     ACCOUNTS_DATA, raw_accounts = load_accounts_from_txt()
-    if not raw_accounts:
-        print("[ERROR] Crea 'cuentas.txt' en la misma carpeta.")
-        return
+    if not raw_accounts: return
 
     print(f"--- Cargando {len(raw_accounts)} cuentas ---")
     
@@ -307,67 +291,61 @@ def main():
         if l_instance:
             SESSION_OBJECTS[acc] = l_instance
             ACCOUNTS_POOL.append(acc)
+            time.sleep(1)
     
     if not ACCOUNTS_POOL: 
-        print("\n[ERROR FATAL] Ninguna cuenta pudo conectarse.")
+        print("\n[ERROR] Sin cuentas activas.")
         return
 
     total_workers = len(ACCOUNTS_POOL) * WORKERS_PER_ACCOUNT
-    print(f"\n>>> INICIANDO CON {total_workers} WORKERS <<<")
+    print(f"\n>>> INICIANDO MODO PRUEBA (Guardando TODO) <<<")
 
     writer_thread = CSVWriterThread(CSV_FILENAME)
     writer_thread.start()
 
+    pool_cycle = cycle(ACCOUNTS_POOL)
     followers_iter = None
-    candidates_copy = list(ACCOUNTS_POOL)
-
-    for candidate_master in candidates_copy:
+    
+    # Seleccion de Maestro
+    for candidate in list(ACCOUNTS_POOL):
         try:
-            print(f"Probando MAESTRO: {candidate_master}...", end=" ")
-            L_candidate = SESSION_OBJECTS[candidate_master]
-            target_profile_obj = instaloader.Profile.from_username(L_candidate.context, TARGET_PROFILE)
-            _ = target_profile_obj.userid 
-            followers_iter = target_profile_obj.get_followers()
-            print(f"OK. ({target_profile_obj.followers} seguidores)")
+            L_candidate = SESSION_OBJECTS[candidate]
+            target = instaloader.Profile.from_username(L_candidate.context, TARGET_PROFILE)
+            followers_iter = target.get_followers()
+            print(f"Maestro: {candidate} -> Target: {TARGET_PROFILE} ({target.followers} followers)")
             break 
-        except Exception as e:
-            print(f"FALLO ({e}). Eliminando...")
-            kill_account(candidate_master)
+        except:
+            kill_account(candidate)
 
-    if followers_iter is None:
-        print("\n[CRITICO] Todas las cuentas fallaron.")
-        writer_thread.stop()
-        return
+    if not followers_iter: return
 
     try:
         with ThreadPoolExecutor(max_workers=total_workers) as executor:
             while True:
                 with POOL_LOCK:
-                    if not ACCOUNTS_POOL:
-                        print("\n\n[SISTEMA] TODAS LAS CUENTAS MURIERON.")
-                        break
-                    current_pool = list(ACCOUNTS_POOL)
+                    if not ACCOUNTS_POOL: break
+                    worker_acc = next(pool_cycle)
+                    while worker_acc not in SESSION_OBJECTS:
+                        worker_acc = next(pool_cycle)
+                        if not ACCOUNTS_POOL: break
 
                 try:
                     follower = next(followers_iter)
                     if follower.username in SAVED_USERS: continue
                     
-                    worker_acc = random.choice(current_pool)
                     executor.submit(worker_task, follower.username, worker_acc)
-                    time.sleep(0.1)
+                    time.sleep(random.uniform(0.1, 0.3)) # Muy rapido para test
 
                 except StopIteration:
-                    print("\n--- Fin de lista ---")
                     break
-                except Exception as e:
-                    print(f"\n[Error Maestro] {e}")
-                    break
+                except Exception:
+                    time.sleep(5)
                     
     except KeyboardInterrupt:
         print("\nDeteniendo...")
     finally:
         writer_thread.stop()
-        print("Finalizado.")
+        print(f"\nFinalizado. Revisa el archivo: {CSV_FILENAME}")
 
 if __name__ == "__main__":
     main()
