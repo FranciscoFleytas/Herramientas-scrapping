@@ -5,7 +5,6 @@ import threading
 import queue
 import hashlib 
 import random
-import json
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice, cycle 
@@ -28,27 +27,28 @@ USER_AGENTS_MAPPING = {
 }
 DEFAULT_UA = "Instagram 200.0.0.30.120 Android (29/10; 420dpi; 1080x2130; Google/google; pixel 4; qcom; en_US; 320922800)"
 
-# --- CONFIGURACION PARA PRUEBA DE CSV ---
-# ATENCION: Esto guardará a TODOS los usuarios para verificar que el archivo se crea.
-TEST_MODE_SAVE_ALL = True 
-
-TARGET_PROFILE = "rkcoaching__"
-MIN_FOLLOWERS = 0       # Aceptamos todo para prueba
-MIN_POSTS = 1           
+# --- CONFIGURACION DE PRODUCCION ---
+TEST_MODE_SAVE_ALL = False
+TARGET_PROFILE = "imthatquez" 
+MIN_FOLLOWERS = 2000    
+MIN_POSTS = 20         
 ENGAGEMENT_THRESHOLD = 0.03
-BAD_POSTS_PERCENTAGE = 0.7
-POSTS_TO_CHECK = 3      # Solo 3 posts para ir rápido
-WORKERS_PER_ACCOUNT = 1 
-
-# --- PAISES PARA ROTACION ---
-PROXY_COUNTRIES = ['us']
+BAD_POSTS_PERCENTAGE = 0.60 
+POSTS_TO_CHECK = 10      
+WORKERS_PER_ACCOUNT = 1
 
 # --- RUTAS ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Optimización: Detección universal del escritorio (Win/Mac/Linux)
+DESKTOP_DIR = os.path.join(os.path.expanduser("~"), "Desktop")
+
 CUENTAS_FILE = os.path.join(SCRIPT_DIR, 'cuentas.txt')
-# Nombre del archivo incluye "_TEST" para diferenciarlo
-CSV_FILENAME = os.path.join(SCRIPT_DIR, f'leads_bajo_engagement_{TARGET_PROFILE}_TEST.csv')
-SESSION_DIR = SCRIPT_DIR 
+# Archivo para recordar usuarios ya analizados (Guardados + Descartados)
+HISTORY_FILE = os.path.join(SCRIPT_DIR, f'history_{TARGET_PROFILE}.txt')
+CSV_FILENAME = os.path.join(DESKTOP_DIR, f'leads_{TARGET_PROFILE}.csv')
+SESSION_DIR = SCRIPT_DIR
+PROXY_COUNTRIES = ['us']
 
 # --- GLOBALES ---
 STATS_LOCK = threading.Lock()
@@ -56,7 +56,7 @@ POOL_LOCK = threading.Lock()
 SESSION_OBJECTS = {} 
 ACCOUNTS_POOL = [] 
 BANNED_ACCOUNTS = set()
-SAVED_USERS = set()
+VISITED_USERS = set() # Set en memoria para O(1) lookup
 WRITE_QUEUE = queue.Queue()
 PROCESSED_COUNT = 0
 SAVED_COUNT = 0
@@ -80,6 +80,22 @@ def load_accounts_from_txt():
                 accounts_data[user] = {'pass': pwd, 'backup_code': backup_code}
                 accounts_list.append(user)
     return accounts_data, accounts_list
+
+# --- GESTION DE HISTORIAL ---
+def load_history():
+    """Carga usuarios ya analizados para no repetir trabajo."""
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                VISITED_USERS.add(line.strip())
+        print(f"Historial cargado: {len(VISITED_USERS)} usuarios ya ignorados.")
+
+def save_visit_async(username):
+    """Guarda usuario en historial sin bloquear el hilo principal."""
+    try:
+        with open(HISTORY_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"{username}\n")
+    except: pass
 
 class CSVWriterThread(threading.Thread):
     def __init__(self, filename):
@@ -106,33 +122,18 @@ class CSVWriterThread(threading.Thread):
                         data = WRITE_QUEUE.get()
                         if data:
                             writer.writerow(data)
-                            SAVED_USERS.add(data[0])
                             WRITE_QUEUE.task_done()
                             count += 1
                     f.flush()
-                    os.fsync(f.fileno()) # Forzar escritura a disco
+                    os.fsync(f.fileno()) 
             except PermissionError:
-                print(f"[ERROR] Cierra el archivo CSV para poder guardar datos.")
+                print(f"[ERROR] Cierra el CSV para guardar datos.")
                 time.sleep(2)
             except Exception:
                 time.sleep(1)
 
     def stop(self):
         self.running = False
-
-def load_existing_db():
-    global SAVED_COUNT
-    if os.path.exists(CSV_FILENAME):
-        try:
-            with open(CSV_FILENAME, 'r', encoding='utf-8-sig') as f:
-                reader = csv.reader(f, delimiter=';')
-                next(reader, None)
-                for row in reader:
-                    if row: SAVED_USERS.add(row[0])
-            SAVED_COUNT = len(SAVED_USERS)
-            print(f"Base de datos precargada: {SAVED_COUNT} registros.")
-        except Exception:
-            pass
 
 def check_proxy_connection(proxy_url):
     try:
@@ -152,7 +153,6 @@ def init_session(username, account_details):
     BASE_HEADERS = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "Sec-Fetch-Dest": "document",
@@ -198,8 +198,7 @@ def init_session(username, account_details):
                 except:
                     print(f"[{username}] Sesión inválida.")
 
-            try:
-                L.context._session.get("https://www.instagram.com/", timeout=15)
+            try: L.context._session.get("https://www.instagram.com/", timeout=15)
             except: pass
 
             try:
@@ -222,7 +221,6 @@ def init_session(username, account_details):
         except Exception:
             time.sleep(1)
             continue
-
     return None
 
 def check_engagement_logic(L, profile):
@@ -231,7 +229,9 @@ def check_engagement_logic(L, profile):
     except Exception:
         return False, 0, 0
     
-    if not posts: return False, 0, 0
+    # Optimización: Evitar división por cero
+    if not posts or len(posts) == 0: 
+        return False, 0, 0
 
     min_likes = profile.followers * ENGAGEMENT_THRESHOLD
     bad_posts = sum(1 for p in posts if p.likes < min_likes)
@@ -251,21 +251,30 @@ def worker_task(target_user, account_user):
     L = SESSION_OBJECTS[account_user]
 
     try:
-        time.sleep(random.uniform(0.5, 1.5)) # Rapido para prueba
+        time.sleep(random.uniform(1.0, 3.0)) 
 
         profile = instaloader.Profile.from_username(L.context, target_user)
+        
         if profile.is_private: return
+        if profile.followers < MIN_FOLLOWERS: return
+        if profile.mediacount < MIN_POSTS: return
 
         is_lead, bad_count, ratio = check_engagement_logic(L, profile)
 
-        # --- LOGICA DE GUARDADO MODIFICADA PARA PRUEBA ---
         should_save = is_lead or TEST_MODE_SAVE_ALL 
         
-        status_msg = "GUARDADO (TEST)" if should_save else "DESCARTADO"
+        if should_save:
+            status_msg = "GUARDADO"
+        else:
+            status_msg = f"DESCARTADO ({bad_count}/{POSTS_TO_CHECK})"
         
         with STATS_LOCK:
             PROCESSED_COUNT += 1
             print(f"[{PROCESSED_COUNT}|{SAVED_COUNT}] {target_user:<15} | Ratio: {ratio:.2f} | {status_msg}", end='\r')
+
+        # Guardamos en historial SIEMPRE, sea bueno o malo
+        VISITED_USERS.add(target_user)
+        save_visit_async(target_user)
 
         if should_save:
             url = f"https://instagram.com/{target_user}"
@@ -279,7 +288,7 @@ def worker_task(target_user, account_user):
 
 def main():
     global ACCOUNTS_POOL
-    load_existing_db()
+    load_history() # Carga previa de historial
     
     ACCOUNTS_DATA, raw_accounts = load_accounts_from_txt()
     if not raw_accounts: return
@@ -291,14 +300,14 @@ def main():
         if l_instance:
             SESSION_OBJECTS[acc] = l_instance
             ACCOUNTS_POOL.append(acc)
-            time.sleep(1)
+            time.sleep(2)
     
     if not ACCOUNTS_POOL: 
         print("\n[ERROR] Sin cuentas activas.")
         return
 
     total_workers = len(ACCOUNTS_POOL) * WORKERS_PER_ACCOUNT
-    print(f"\n>>> INICIANDO MODO PRUEBA (Guardando TODO) <<<")
+    print(f"\n>>> INICIANDO SCRAPING ({total_workers} Workers) <<<")
 
     writer_thread = CSVWriterThread(CSV_FILENAME)
     writer_thread.start()
@@ -306,7 +315,6 @@ def main():
     pool_cycle = cycle(ACCOUNTS_POOL)
     followers_iter = None
     
-    # Seleccion de Maestro
     for candidate in list(ACCOUNTS_POOL):
         try:
             L_candidate = SESSION_OBJECTS[candidate]
@@ -331,10 +339,13 @@ def main():
 
                 try:
                     follower = next(followers_iter)
-                    if follower.username in SAVED_USERS: continue
+                    
+                    # VALIDACION DE HISTORIAL
+                    if follower.username in VISITED_USERS: 
+                        continue
                     
                     executor.submit(worker_task, follower.username, worker_acc)
-                    time.sleep(random.uniform(0.1, 0.3)) # Muy rapido para test
+                    time.sleep(random.uniform(0.5, 2.0))
 
                 except StopIteration:
                     break
@@ -345,7 +356,8 @@ def main():
         print("\nDeteniendo...")
     finally:
         writer_thread.stop()
-        print(f"\nFinalizado. Revisa el archivo: {CSV_FILENAME}")
+        print(f"\nFinalizado. CSV en: {CSV_FILENAME}")
+        print(f"Historial actualizado en: {HISTORY_FILE}")
 
 if __name__ == "__main__":
     main()
