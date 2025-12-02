@@ -27,13 +27,17 @@ USER_AGENTS_MAPPING = {
 DEFAULT_UA = "Instagram 200.0.0.30.120 Android (29/10; 420dpi; 1080x2130; Google/google; pixel 4; qcom; en_US; 320922800)"
 
 # --- CONFIGURACION DE FILTRADO ---
-TARGET_PROFILE = "maradorne" 
-MIN_FOLLOWERS = 10000   
+TARGET_PROFILE = "mickunplugged" 
+
+# RANGO DE SEGUIDORES (NUEVO)
+MIN_FOLLOWERS = 2000    # Mínimo de seguidores
+MAX_FOLLOWERS = 100000  # Máximo de seguidores
+
 MIN_POSTS = 100          
 POSTS_TO_CHECK = 0      
 WORKERS_PER_ACCOUNT = 1 
 
-# --- CONFIGURACION DE ENFRIAMIENTO (NUEVO) ---
+# --- CONFIGURACION DE ENFRIAMIENTO ---
 COOLDOWN_MINUTES = 60  # Tiempo que descansa una cuenta si recibe advertencia
 
 # --- RUTAS ---
@@ -300,14 +304,18 @@ def worker_task(target_user, account_user):
         if profile.is_private: return
 
         # Si descartamos, usamos \r para que se sobrescriba (ahorra espacio visual)
-        if profile.followers < MIN_FOLLOWERS: 
+        
+        # --- NUEVA LÓGICA DE FILTRADO POR RANGO ---
+        # Verificamos si NO está en el rango (Menor que Mínimo O Mayor que Máximo)
+        if not (MIN_FOLLOWERS <= profile.followers <= MAX_FOLLOWERS):
             VISITED_USERS.add(target_user)
             save_visit_async(target_user)
             with STATS_LOCK:
                 PROCESSED_COUNT += 1
                 # Mensaje efímero (se borra con el siguiente)
-                print(f"[{PROCESSED_COUNT}|{SAVED_COUNT}] {target_user:<15} | < Followers | DESCARTADO", end='\r')
+                print(f"[{PROCESSED_COUNT}|{SAVED_COUNT}] {target_user:<15} | Followers: {profile.followers} | DESCARTADO", end='\r')
             return
+        # --------------------------------------------
 
         if profile.mediacount < MIN_POSTS:
             VISITED_USERS.add(target_user)
@@ -361,6 +369,7 @@ def main():
         return
 
     print(f"\n>>> INICIANDO SCRAPING DE SEGUIDOS CON SMART POOL <<<")
+    print(f">>> Rango aceptado: {MIN_FOLLOWERS} a {MAX_FOLLOWERS} seguidores.")
 
     writer_thread = CSVWriterThread(CSV_FILENAME)
     writer_thread.start()
