@@ -4,6 +4,7 @@ import os
 import random
 import shutil
 import re
+import json
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -11,9 +12,9 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 
 # --- CONFIGURACIÓN ---
-TARGET_PROFILE = "mickunplugged"
-MAX_LEADS = 200          # Meta de leads a guardar
-MIN_FOLLOWERS = 2000      # Mínimo seguidores del lead
+TARGET_PROFILE = "mickunplugged"  
+MAX_LEADS = 200          
+MIN_FOLLOWERS = 2000      
 MAX_FOLLOWERS_CAP = 250000 
 MIN_POSTS = 100           
 
@@ -23,11 +24,22 @@ PROXY_PORT = "33335"
 PROXY_USER = "brd-customer-hl_23e53168-zone-residential_proxy1-country-ar"
 PROXY_PASS = "ei0g975bijby"
 
-# RUTAS
+# --- GESTIÓN DE RUTAS Y CARPETAS ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CUENTAS_FILE = os.path.join(SCRIPT_DIR, 'cuentas.txt')
-CSV_FILENAME = os.path.join(SCRIPT_DIR, f'leads_seguidos_{TARGET_PROFILE}.csv')
-HISTORY_FILE = os.path.join(SCRIPT_DIR, f'history_scraped_{TARGET_PROFILE}.txt')
+CUENTAS_FILE = os.path.join(SCRIPT_DIR, 'cuentas.json')
+
+RESULTS_DIR = os.path.join(SCRIPT_DIR, "RESULTADOS")
+TARGET_DIR = os.path.join(RESULTS_DIR, TARGET_PROFILE)
+
+if not os.path.exists(TARGET_DIR):
+    try:
+        os.makedirs(TARGET_DIR)
+        print(f"--- [SISTEMA] Carpeta creada: {TARGET_DIR} ---")
+    except OSError as e:
+        print(f"[ERROR] No se pudo crear la carpeta: {e}")
+
+CSV_FILENAME = os.path.join(TARGET_DIR, f'leads_seguidos_{TARGET_PROFILE}.csv')
+HISTORY_FILE = os.path.join(TARGET_DIR, f'history_scraped_{TARGET_PROFILE}.txt')
 
 def create_proxy_auth_folder(host, port, user, password, session_id):
     manifest_json = """
@@ -61,14 +73,19 @@ def create_proxy_auth_folder(host, port, user, password, session_id):
     return folder_name
 
 def load_accounts():
-    accs = []
-    if os.path.exists(CUENTAS_FILE):
-        with open(CUENTAS_FILE, 'r') as f:
-            for line in f:
-                parts = line.strip().split(':')
-                if len(parts) >= 2:
-                    accs.append({'user': parts[0], 'pass': parts[1]})
-    return accs
+    if not os.path.exists(CUENTAS_FILE):
+        print(f"[ERROR] No se encontró: {CUENTAS_FILE}")
+        return []
+    try:
+        with open(CUENTAS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                print(f"[OK] JSON cargado correctamente ({len(data)} cuentas).")
+                return data
+            return []
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        return []
 
 def load_history():
     history = set()
@@ -82,48 +99,54 @@ def save_to_history(username):
     with open(HISTORY_FILE, 'a') as f:
         f.write(f"{username}\n")
 
-def human_type(element, text):
-    for char in text:
-        element.send_keys(char)
-        time.sleep(random.uniform(0.05, 0.15))
-
-# --- NUEVA FUNCIÓN PARA CERRAR POPUPS ---
 def dismiss_popups(driver):
-    """Cierra cualquier ventana emergente de IG (Notificaciones, Guardar Login, etc)."""
-    # Textos comunes de botones para cerrar
-    buttons_text = [
-        "Not Now", "Ahora no", "Cancel", "Cancelar", 
-        "Not now", "ahora no", "Allow", "Permitir",
-        "Add to Home Screen", "Añadir a pantalla de inicio"
-    ]
-    
-    # Intentamos 3 veces por si hay varios popups apilados
-    for _ in range(3):
+    buttons_text = ["Not Now", "Ahora no", "Cancel", "Cancelar", "Not now", "ahora no"]
+    for _ in range(2):
         found = False
         for txt in buttons_text:
             try:
-                # Busca botones o divs clickeables con el texto
                 xpath = f"//button[contains(text(), '{txt}')] | //div[@role='button'][contains(text(), '{txt}')]"
                 elements = driver.find_elements(By.XPATH, xpath)
                 for btn in elements:
                     if btn.is_displayed():
-                        print(f"   [POPUP] Cerrando: {txt}")
                         driver.execute_script("arguments[0].click();", btn)
-                        time.sleep(1)
+                        time.sleep(0.5)
                         found = True
             except: pass
         if not found: break
-        time.sleep(0.5)
+
+def extract_category(driver):
+    category = "-"
+    try:
+        elements = driver.find_elements(By.XPATH, "//div[contains(@class, 'x7a106z')] | //div[contains(@class, 'x1re03b8')]")
+        for el in elements:
+            text = el.text.strip()
+            if text and len(text) < 40 and not any(char.isdigit() for char in text):
+                if "seguido" in text.lower() or "followed" in text.lower(): continue
+                category = text
+                break
+        
+        if category == "-":
+            links = driver.find_elements(By.XPATH, "//a[contains(@href, '/explore/locations/') or contains(@href, '/explore/tags/')]")
+            for link in links:
+                if link.text.strip() and len(link.text) > 3:
+                    category = link.text.strip()
+                    break
+    except: pass
+    return category
 
 def analyze_profile_visual(driver, username):
     try:
-        wait = WebDriverWait(driver, 8)
-        if "accounts/login" in driver.current_url: return False, 0, 0
+        # Aumentamos timeout a 10s para perfiles lentos
+        wait = WebDriverWait(driver, 10)
+        
+        # Check rápido de login fallido
+        if "accounts/login" in driver.current_url: return False, 0, 0, "-"
             
         try:
             meta_element = wait.until(EC.presence_of_element_located((By.XPATH, "//meta[@name='description']")))
             meta_content = meta_element.get_attribute("content").lower()
-        except: return False, 0, 0
+        except: return False, 0, 0, "-"
 
         followers = 0
         posts = 0
@@ -142,122 +165,139 @@ def analyze_profile_visual(driver, username):
             if 'k' in raw: posts = int(float(raw.replace('k', '')) * 1000)
             else: posts = int(raw.replace('.', ''))
 
-        if followers < MIN_FOLLOWERS:
-            print(f"   [X] Muy chico ({followers}): {username}")
-            return False, followers, posts
-        
-        if followers > MAX_FOLLOWERS_CAP:
-            print(f"   [X] Muy grande ({followers}): {username}")
-            return False, followers, posts
+        category = extract_category(driver)
+
+        if not (MIN_FOLLOWERS <= followers <= MAX_FOLLOWERS_CAP):
+            print(f"   [X] Followers: {followers}")
+            return False, followers, posts, category
         
         if posts < MIN_POSTS:
-            print(f"   [X] Inactivo ({posts}): {username}")
-            return False, followers, posts
+            print(f"   [X] Inactivo ({posts} posts)")
+            return False, followers, posts, category
 
-        print(f"   [OK] LEAD CALIFICADO: {username} ({followers} segs)")
-        return True, followers, posts
+        print(f"   [OK] LEAD: {username} | F:{followers} | Cat:{category}")
+        return True, followers, posts, category
 
-    except Exception:
-        return False, 0, 0
+    except:
+        return False, 0, 0, "-"
 
 def run_scraper_session(account, total_leads_found):
-    session_id = str(random.randint(100000, 999999))
+    if not account.get('sessionid'): return False
+
+    session_id_rand = str(random.randint(100000, 999999))
     print(f"\n--- Iniciando sesión con {account['user']} ---")
     
-    plugin_path = create_proxy_auth_folder(PROXY_HOST, PROXY_PORT, PROXY_USER, PROXY_PASS, session_id)
+    plugin_path = create_proxy_auth_folder(PROXY_HOST, PROXY_PORT, PROXY_USER, PROXY_PASS, session_id_rand)
     
     options = uc.ChromeOptions()
     options.add_argument(f'--load-extension={os.path.abspath(plugin_path)}')
+    options.add_argument("--disable-notifications")
+    options.add_argument("--disable-popup-blocking") # Fuerza bruta anti-popups
     options.add_argument('--lang=en-US')
     options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage') 
-    options.add_argument('--disable-gpu')
-    options.add_argument('--disable-popup-blocking') 
-    options.add_argument('--ignore-certificate-errors')
-    options.add_argument('--allow-running-insecure-content')
-    options.add_argument('--disable-web-security')
-    options.add_argument('--disable-quic')
-    options.add_argument('--user-agent=Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36')
-
+    
     driver = None
     try:
-        driver = uc.Chrome(options=options, use_subprocess=True)
+        driver = uc.Chrome(options=options, use_subprocess=True, version_main=142)
         driver.set_window_size(412, 915)
 
-        # LOGIN
-        print("Login...")
-        driver.get("https://www.instagram.com/accounts/login/")
-        wait = WebDriverWait(driver, 25)
-        time.sleep(3)
-        try: driver.find_element(By.XPATH, "//button[contains(text(), 'Allow')]").click()
-        except: pass
+        driver.get("https://www.instagram.com/404") 
+        time.sleep(2)
 
-        user_input = wait.until(EC.visibility_of_element_located((By.NAME, "username")))
-        human_type(user_input, account['user'])
-        human_type(driver.find_element(By.NAME, "password"), account['pass'])
-        driver.find_element(By.NAME, "password").send_keys(Keys.ENTER)
-        
-        time.sleep(10)
-        
-        # --- LIMPIEZA DE POPUPS DESPUES DEL LOGIN ---
-        dismiss_popups(driver)
-        # --------------------------------------------
+        driver.add_cookie({
+            'name': 'sessionid',
+            'value': account['sessionid'],
+            'domain': '.instagram.com',
+            'path': '/',
+            'secure': True,
+            'httpOnly': True
+        })
 
-        # TARGET
         print(f"Yendo a {TARGET_PROFILE}...")
         driver.get(f"https://www.instagram.com/{TARGET_PROFILE}/")
         time.sleep(5)
         
-        # Limpieza por si salen popups al cargar perfil
+        if "login" in driver.current_url:
+            print("[ERROR] SessionID inválida.")
+            return False
+
         dismiss_popups(driver)
 
-        # --- ABRIR LISTA DE SEGUIDOS (FOLLOWING) ---
         try:
-            print("Abriendo lista de SEGUIDOS...")
-            following_link = driver.find_element(By.XPATH, f"//a[contains(@href, 'following')]")
+            print("Abriendo lista...")
+            following_link = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, f"//a[contains(@href, 'following')]"))
+            )
             following_link.click()
             print("Lista abierta.")
         except:
-            print("[ERROR] No se pudo abrir la lista de seguidos (Verifica si es publica).")
+            print("[ERROR] No se pudo abrir la lista.")
             return False 
 
-        time.sleep(4)
+        time.sleep(3)
 
         analyzed_history = load_history()
         consecutive_fails = 0
         leads_in_session = 0
         
-        print(f"--- ANALIZANDO SEGUIDOS (Total: {total_leads_found}) ---")
+        print(f"--- ANALIZANDO... ---")
         
-        IGNORE = [TARGET_PROFILE, account['user'], 'home', 'reels', 'create', 'search', 'explore', 'direct', 'inbox']
+        IGNORE = [TARGET_PROFILE, account['user']]
+
+        try:
+            dialog_box = driver.find_element(By.XPATH, "//div[@role='dialog']")
+        except:
+            print("No se detectó el cuadro de diálogo.")
+            return False
 
         while total_leads_found < MAX_LEADS:
-            # Limpieza periódica de popups
             dismiss_popups(driver)
             
-            elements = driver.find_elements(By.XPATH, "//a[not(contains(@href, 'explore')) and not(contains(@href, 'following'))]")
+            try:
+                elements = dialog_box.find_elements(By.TAG_NAME, "a")
+            except:
+                print("El diálogo se cerró o cambió.")
+                break
             
             new_candidates = []
+            last_element_found = None
+
             for elem in elements:
                 try:
+                    last_element_found = elem
+                    
                     href = elem.get_attribute('href')
-                    if href and 'instagram.com/' in href:
-                        user = href.strip('/').split('/')[-1]
-                        
-                        if user in IGNORE: continue
-                        if len(user) > 30 or '?' in user: continue
+                    if not href or 'instagram.com/' not in href: continue
+                    
+                    clean_href = href.split('?')[0].rstrip('/')
+                    user = clean_href.split('/')[-1]
+                    
+                    if any(x in clean_href for x in ['/p/', '/reels/', '/stories/', '/explore/', '/direct/']): continue
+                    if user.isdigit(): continue 
+                    if user in IGNORE or len(user) < 3: continue
+                    
+                    if not elem.text.strip(): continue
 
-                        if user not in analyzed_history:
-                            new_candidates.append(user)
-                            analyzed_history.add(user) 
+                    if user not in analyzed_history:
+                        new_candidates.append(user)
+                        analyzed_history.add(user) 
                 except: pass
             
             if not new_candidates:
                 consecutive_fails += 1
                 if consecutive_fails > 10:
-                    print("Fin de scroll o bloqueo.")
+                    print("Fin de lista o bloqueo.")
                     return True 
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                
+                # Scroll
+                if last_element_found:
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView(true);", last_element_found)
+                    except: pass
+                else:
+                    try: dialog_box.send_keys(Keys.END)
+                    except: pass
+                
                 time.sleep(2)
                 continue
             
@@ -269,12 +309,19 @@ def run_scraper_session(account, total_leads_found):
                 save_to_history(user)
 
                 try:
-                    driver.execute_script(f"window.open('https://www.instagram.com/{user}/', '_blank');")
-                    WebDriverWait(driver, 5).until(lambda d: len(d.window_handles) > 1)
+                    # ESTRATEGIA STABLE: Abrir en blanco -> Navegar
+                    driver.execute_script("window.open('about:blank', '_blank');")
+                    
+                    # Esperar pestaña (10s)
+                    WebDriverWait(driver, 10).until(lambda d: len(d.window_handles) > 1)
                     driver.switch_to.window(driver.window_handles[-1])
                     
-                    is_valid, num_f, num_p = analyze_profile_visual(driver, user)
+                    # Cargar Perfil
+                    driver.get(f"https://www.instagram.com/{user}/")
                     
+                    is_valid, num_f, num_p, cat = analyze_profile_visual(driver, user)
+                    
+                    # Cerrar y volver
                     driver.close()
                     driver.switch_to.window(main_window)
                     
@@ -283,27 +330,32 @@ def run_scraper_session(account, total_leads_found):
                         leads_in_session += 1
                         with open(CSV_FILENAME, 'a', newline='', encoding='utf-8-sig') as f:
                             writer = csv.writer(f, delimiter=';')
-                            writer.writerow([user, f"https://instagram.com/{user}", num_f, num_p, "FOLLOWING"])
+                            writer.writerow([user, f"https://instagram.com/{user}", num_f, num_p, cat, "FOLLOWING"])
                         
                         if total_leads_found >= MAX_LEADS: return True
 
-                    time.sleep(random.uniform(1.5, 3))
+                    time.sleep(random.uniform(2, 4)) 
 
                 except Exception as e:
-                    print(f" [SKIP] Error Pestaña")
+                    print(f" [SKIP] Error: {e}")
+                    # Recuperación de emergencia
                     try:
-                        if len(driver.window_handles) > 1:
-                            for h in driver.window_handles[1:]:
-                                driver.switch_to.window(h)
-                                driver.close()
+                        while len(driver.window_handles) > 1:
+                            driver.switch_to.window(driver.window_handles[-1])
+                            driver.close()
                         driver.switch_to.window(main_window)
-                    except: return False 
+                    except: 
+                        return False 
 
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(random.uniform(2, 4))
+            if last_element_found:
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView(true);", last_element_found)
+                except: pass
             
-            if leads_in_session > 40:
-                print("Límite por cuenta alcanzado. Rotando...")
+            time.sleep(random.uniform(1.5, 3))
+            
+            if leads_in_session > 30: 
+                print("Rotando cuenta por seguridad...")
                 return False 
 
         return True 
@@ -319,27 +371,31 @@ def run_scraper_session(account, total_leads_found):
         if os.path.exists(plugin_path): shutil.rmtree(plugin_path)
 
 def main():
-    print("--- SCRAPER SEGUIDOS (CON AUTO-CIERRE POPUPS) ---")
+    print(f"--- SCRAPER SEGUIDOS (DIR: {RESULTS_DIR}) ---")
     
     if not os.path.exists(CSV_FILENAME):
         with open(CSV_FILENAME, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f, delimiter=';')
-            writer.writerow(["Usuario", "URL", "Seguidores", "Publicaciones", "Origen"])
+            writer.writerow(["Usuario", "URL", "Seguidores", "Publicaciones", "Categoria", "Origen"])
     
     current_leads = 0
-    with open(CSV_FILENAME, 'r', encoding='utf-8-sig') as f:
-        current_leads = sum(1 for row in csv.reader(f, delimiter=';')) - 1
-        if current_leads < 0: current_leads = 0
+    if os.path.exists(CSV_FILENAME):
+        with open(CSV_FILENAME, 'r', encoding='utf-8-sig') as f:
+            rows = list(csv.reader(f, delimiter=';'))
+            current_leads = max(0, len(rows) - 1)
     
     accounts = load_accounts()
+    
     if not accounts:
-        print("Sin cuentas.")
+        print("ERROR: No hay cuentas válidas en cuentas.json")
         return
+
+    print(f"Cargadas {len(accounts)} cuentas con SessionID.")
 
     acc_index = 0
     while current_leads < MAX_LEADS:
         if acc_index >= len(accounts):
-            print("Ciclo terminado. Esperando 5 min...")
+            print("Ciclo de cuentas terminado. Esperando 5 min...")
             time.sleep(300)
             acc_index = 0
         
@@ -351,7 +407,8 @@ def main():
         
         acc_index += 1
         with open(CSV_FILENAME, 'r', encoding='utf-8-sig') as f:
-            current_leads = sum(1 for row in csv.reader(f, delimiter=';')) - 1
+            rows = list(csv.reader(f, delimiter=';'))
+            current_leads = max(0, len(rows) - 1)
         
         print(f"Total Leads: {current_leads}/{MAX_LEADS}. Cambiando cuenta...")
         time.sleep(5)
