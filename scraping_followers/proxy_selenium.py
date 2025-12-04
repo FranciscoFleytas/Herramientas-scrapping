@@ -12,11 +12,40 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 
 # --- CONFIGURACIÓN ---
-TARGET_PROFILE = "mickunplugged"  
-MAX_LEADS = 200          
+TARGET_PROFILES = ["itsmarcofontana","nat_romo","simonbeingsimon","martonymoral_","sasha.joll","marcomaranghello","lifecoachjesse","juliusfewmd", "profmaximiliancatenacci", "drjoeniamtu", "maxilocaracas"]  
+MAX_LEADS_PER_TARGET = 300      
 MIN_FOLLOWERS = 2000      
 MAX_FOLLOWERS_CAP = 250000 
 MIN_POSTS = 100           
+
+# Palabras clave para la nueva columna "Nicho"
+TARGET_KEYWORDS = [
+    # Nichos originales
+    "speaker", "medico", "fitness", "coach", "medic", 
+    "influencer", "creator content", "creador de contenido", "podcast",
+
+    # Categoría: Visual Quality & Aesthetics
+    "model", "modelo", "fashion", "moda", 
+    "architect", "arquitecto", "interior design", "diseñador de interiores",
+    "real estate", "bienes raices", "inmobiliaria", "realtor",
+    "photographer", "fotografo", "videographer", "filmmaker", "editor", "video editor",
+
+    # Categoría: Authority & Leadership
+    "consultant", "consultor", "ceo", "founder", "fundador", 
+    "business owner", "dueño de negocio", "entrepreneur", "emprendedor",
+    "infoproducer", "infoproductor", "course creator", "creador de cursos",
+    "mentor", "mentoring", "public speaker", "conferencista",
+
+    # Categoría: Narrative & Strategy
+    "agency owner", "dueño de agencia", "marketing", "marketer", 
+    "strategist", "estratega", "brand specialist", "branding"
+]
+
+# Si tras 15 scrolls no hay nada nuevo -> Fin de la lista del target
+MAX_CONSECUTIVE_EMPTY_SCROLLS = 15 
+
+# Límite de seguridad para rotar cuenta de scraping (no el target)
+SAFETY_SESSION_LIMIT = 30
 
 # CREDENCIALES PROXY
 PROXY_HOST = "brd.superproxy.io"
@@ -27,19 +56,17 @@ PROXY_PASS = "ei0g975bijby"
 # --- GESTIÓN DE RUTAS Y CARPETAS ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CUENTAS_FILE = os.path.join(SCRIPT_DIR, 'cuentas.json')
-
 RESULTS_DIR = os.path.join(SCRIPT_DIR, "RESULTADOS")
-TARGET_DIR = os.path.join(RESULTS_DIR, TARGET_PROFILE)
 
-if not os.path.exists(TARGET_DIR):
-    try:
-        os.makedirs(TARGET_DIR)
-        print(f"--- [SISTEMA] Carpeta creada: {TARGET_DIR} ---")
-    except OSError as e:
-        print(f"[ERROR] No se pudo crear la carpeta: {e}")
-
-CSV_FILENAME = os.path.join(TARGET_DIR, f'leads_seguidos_{TARGET_PROFILE}.csv')
-HISTORY_FILE = os.path.join(TARGET_DIR, f'history_scraped_{TARGET_PROFILE}.txt')
+def get_target_paths(target_profile):
+    target_dir = os.path.join(RESULTS_DIR, target_profile)
+    if not os.path.exists(target_dir):
+        try: os.makedirs(target_dir)
+        except OSError: pass
+    
+    csv_file = os.path.join(target_dir, f'leads_seguidos_{target_profile}.csv')
+    history_file = os.path.join(target_dir, f'history_scraped_{target_profile}.txt')
+    return target_dir, csv_file, history_file
 
 def create_proxy_auth_folder(host, port, user, password, session_id):
     manifest_json = """
@@ -73,31 +100,22 @@ def create_proxy_auth_folder(host, port, user, password, session_id):
     return folder_name
 
 def load_accounts():
-    if not os.path.exists(CUENTAS_FILE):
-        print(f"[ERROR] No se encontró: {CUENTAS_FILE}")
-        return []
+    if not os.path.exists(CUENTAS_FILE): return []
     try:
         with open(CUENTAS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            if isinstance(data, list):
-                print(f"[OK] JSON cargado correctamente ({len(data)} cuentas).")
-                return data
-            return []
-    except Exception as e:
-        print(f"[ERROR] {e}")
-        return []
+            return data if isinstance(data, list) else []
+    except: return []
 
-def load_history():
+def load_history(history_file):
     history = set()
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, 'r') as f:
-            for line in f:
-                history.add(line.strip())
+    if os.path.exists(history_file):
+        with open(history_file, 'r') as f:
+            for line in f: history.add(line.strip())
     return history
 
-def save_to_history(username):
-    with open(HISTORY_FILE, 'a') as f:
-        f.write(f"{username}\n")
+def save_to_history(username, history_file):
+    with open(history_file, 'a') as f: f.write(f"{username}\n")
 
 def dismiss_popups(driver):
     buttons_text = ["Not Now", "Ahora no", "Cancel", "Cancelar", "Not now", "ahora no"]
@@ -125,7 +143,6 @@ def extract_category(driver):
                 if "seguido" in text.lower() or "followed" in text.lower(): continue
                 category = text
                 break
-        
         if category == "-":
             links = driver.find_elements(By.XPATH, "//a[contains(@href, '/explore/locations/') or contains(@href, '/explore/tags/')]")
             for link in links:
@@ -135,22 +152,24 @@ def extract_category(driver):
     except: pass
     return category
 
+def get_niche_match(description_text):
+    if not description_text: return "-"
+    desc_lower = description_text.lower()
+    for kw in TARGET_KEYWORDS:
+        if kw.lower() in desc_lower: return kw
+    return "-"
+
 def analyze_profile_visual(driver, username):
     try:
-        # Aumentamos timeout a 10s para perfiles lentos
         wait = WebDriverWait(driver, 10)
-        
-        # Check rápido de login fallido
-        if "accounts/login" in driver.current_url: return False, 0, 0, "-"
-            
+        if "accounts/login" in driver.current_url: return False, 0, 0, "-", "-"
         try:
             meta_element = wait.until(EC.presence_of_element_located((By.XPATH, "//meta[@name='description']")))
             meta_content = meta_element.get_attribute("content").lower()
-        except: return False, 0, 0, "-"
+        except: return False, 0, 0, "-", "-"
 
         followers = 0
         posts = 0
-
         f_match = re.search(r'([0-9\.,km]+)\s*(followers|seguidores)', meta_content)
         p_match = re.search(r'([0-9\.,km]+)\s*(posts|publicaciones)', meta_content)
 
@@ -166,98 +185,84 @@ def analyze_profile_visual(driver, username):
             else: posts = int(raw.replace('.', ''))
 
         category = extract_category(driver)
+        niche = get_niche_match(meta_content)
 
         if not (MIN_FOLLOWERS <= followers <= MAX_FOLLOWERS_CAP):
             print(f"   [X] Followers: {followers}")
-            return False, followers, posts, category
+            return False, followers, posts, category, niche
         
         if posts < MIN_POSTS:
             print(f"   [X] Inactivo ({posts} posts)")
-            return False, followers, posts, category
+            return False, followers, posts, category, niche
 
-        print(f"   [OK] LEAD: {username} | F:{followers} | Cat:{category}")
-        return True, followers, posts, category
+        print(f"   [OK] LEAD: {username} | F:{followers} | Cat:{category} | Nicho:{niche}")
+        return True, followers, posts, category, niche
 
-    except:
-        return False, 0, 0, "-"
+    except: return False, 0, 0, "-", "-"
 
-def run_scraper_session(account, total_leads_found):
-    if not account.get('sessionid'): return False
+def run_scraper_session(account, current_leads_count, target_profile):
+    """
+    Retorna (bool, int):
+    - True: El target ya no tiene más datos o se terminó (Lista fin o Max Leads).
+    - False: La sesión terminó por seguridad (limite 30), pero el target sigue vivo.
+    """
+    if not account.get('sessionid'): return False, 0
+    _, csv_filename, history_file = get_target_paths(target_profile)
 
     session_id_rand = str(random.randint(100000, 999999))
-    print(f"\n--- Iniciando sesión con {account['user']} ---")
+    print(f"\n--- [TARGET: {target_profile}] Iniciando sesión con {account['user']} ---")
     
     plugin_path = create_proxy_auth_folder(PROXY_HOST, PROXY_PORT, PROXY_USER, PROXY_PASS, session_id_rand)
     
     options = uc.ChromeOptions()
     options.add_argument(f'--load-extension={os.path.abspath(plugin_path)}')
     options.add_argument("--disable-notifications")
-    options.add_argument("--disable-popup-blocking") # Fuerza bruta anti-popups
+    options.add_argument("--disable-popup-blocking") 
     options.add_argument('--lang=en-US')
     options.add_argument('--no-sandbox')
+    options.add_argument('--headless=new')  
     
     driver = None
+    leads_added_this_session = 0
+
     try:
         driver = uc.Chrome(options=options, use_subprocess=True, version_main=142)
-        driver.set_window_size(412, 915)
+        driver.set_window_size(412, 915) 
 
         driver.get("https://www.instagram.com/404") 
         time.sleep(2)
+        driver.add_cookie({'name': 'sessionid', 'value': account['sessionid'], 'domain': '.instagram.com', 'path': '/', 'secure': True, 'httpOnly': True})
 
-        driver.add_cookie({
-            'name': 'sessionid',
-            'value': account['sessionid'],
-            'domain': '.instagram.com',
-            'path': '/',
-            'secure': True,
-            'httpOnly': True
-        })
-
-        print(f"Yendo a {TARGET_PROFILE}...")
-        driver.get(f"https://www.instagram.com/{TARGET_PROFILE}/")
+        print(f"Yendo a {target_profile}...")
+        driver.get(f"https://www.instagram.com/{target_profile}/")
         time.sleep(5)
         
         if "login" in driver.current_url:
             print("[ERROR] SessionID inválida.")
-            return False
+            return False, 0
 
         dismiss_popups(driver)
-
         try:
-            print("Abriendo lista...")
-            following_link = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, f"//a[contains(@href, 'following')]"))
-            )
+            following_link = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, f"//a[contains(@href, 'following')]")))
             following_link.click()
             print("Lista abierta.")
         except:
             print("[ERROR] No se pudo abrir la lista.")
-            return False 
+            return False, 0
 
         time.sleep(3)
-
-        analyzed_history = load_history()
+        analyzed_history = load_history(history_file)
         consecutive_fails = 0
-        leads_in_session = 0
+        IGNORE = [target_profile, account['user']]
         
-        print(f"--- ANALIZANDO... ---")
-        
-        IGNORE = [TARGET_PROFILE, account['user']]
+        try: dialog_box = driver.find_element(By.XPATH, "//div[@role='dialog']")
+        except: return False, 0
 
-        try:
-            dialog_box = driver.find_element(By.XPATH, "//div[@role='dialog']")
-        except:
-            print("No se detectó el cuadro de diálogo.")
-            return False
-
-        while total_leads_found < MAX_LEADS:
+        while (current_leads_count + leads_added_this_session) < MAX_LEADS_PER_TARGET:
             dismiss_popups(driver)
             
-            try:
-                elements = dialog_box.find_elements(By.TAG_NAME, "a")
-            except:
-                print("El diálogo se cerró o cambió.")
-                break
+            try: elements = dialog_box.find_elements(By.TAG_NAME, "a")
+            except: break
             
             new_candidates = []
             last_element_found = None
@@ -265,17 +270,12 @@ def run_scraper_session(account, total_leads_found):
             for elem in elements:
                 try:
                     last_element_found = elem
-                    
                     href = elem.get_attribute('href')
                     if not href or 'instagram.com/' not in href: continue
-                    
                     clean_href = href.split('?')[0].rstrip('/')
                     user = clean_href.split('/')[-1]
-                    
                     if any(x in clean_href for x in ['/p/', '/reels/', '/stories/', '/explore/', '/direct/']): continue
-                    if user.isdigit(): continue 
-                    if user in IGNORE or len(user) < 3: continue
-                    
+                    if user.isdigit() or user in IGNORE or len(user) < 3: continue
                     if not elem.text.strip(): continue
 
                     if user not in analyzed_history:
@@ -283,16 +283,18 @@ def run_scraper_session(account, total_leads_found):
                         analyzed_history.add(user) 
                 except: pass
             
+            # --- DETECCION DE FIN DE LISTA / BLOQUEO ---
             if not new_candidates:
                 consecutive_fails += 1
-                if consecutive_fails > 10:
-                    print("Fin de lista o bloqueo.")
-                    return True 
+                print(f"   [!] Scroll sin nuevos leads ({consecutive_fails}/{MAX_CONSECUTIVE_EMPTY_SCROLLS})...")
                 
-                # Scroll
+                if consecutive_fails >= MAX_CONSECUTIVE_EMPTY_SCROLLS:
+                    print(f"   [STOP] No se encuentran nuevos usuarios tras {MAX_CONSECUTIVE_EMPTY_SCROLLS} intentos.")
+                    print("   >>> Fin de lista o Bloqueo. Pasando al siguiente Target.")
+                    return True, leads_added_this_session
+                
                 if last_element_found:
-                    try:
-                        driver.execute_script("arguments[0].scrollIntoView(true);", last_element_found)
+                    try: driver.execute_script("arguments[0].scrollIntoView(true);", last_element_found)
                     except: pass
                 else:
                     try: dialog_box.send_keys(Keys.END)
@@ -306,63 +308,58 @@ def run_scraper_session(account, total_leads_found):
             
             for user in new_candidates:
                 print(f"Analizando: {user}...", end="")
-                save_to_history(user)
+                save_to_history(user, history_file)
 
                 try:
-                    # ESTRATEGIA STABLE: Abrir en blanco -> Navegar
                     driver.execute_script("window.open('about:blank', '_blank');")
-                    
-                    # Esperar pestaña (10s)
                     WebDriverWait(driver, 10).until(lambda d: len(d.window_handles) > 1)
                     driver.switch_to.window(driver.window_handles[-1])
-                    
-                    # Cargar Perfil
                     driver.get(f"https://www.instagram.com/{user}/")
                     
-                    is_valid, num_f, num_p, cat = analyze_profile_visual(driver, user)
+                    is_valid, num_f, num_p, cat, niche = analyze_profile_visual(driver, user)
                     
-                    # Cerrar y volver
                     driver.close()
                     driver.switch_to.window(main_window)
                     
                     if is_valid:
-                        total_leads_found += 1
-                        leads_in_session += 1
-                        with open(CSV_FILENAME, 'a', newline='', encoding='utf-8-sig') as f:
-                            writer = csv.writer(f, delimiter=';')
-                            writer.writerow([user, f"https://instagram.com/{user}", num_f, num_p, cat, "FOLLOWING"])
+                        leads_added_this_session += 1
+                        total_now = current_leads_count + leads_added_this_session
                         
-                        if total_leads_found >= MAX_LEADS: return True
+                        print(f"   >>> [PROGRESO] {total_now}/{MAX_LEADS_PER_TARGET} Leads para {target_profile}")
+                        
+                        with open(csv_filename, 'a', newline='', encoding='utf-8-sig') as f:
+                            writer = csv.writer(f, delimiter=';')
+                            writer.writerow([user, f"https://instagram.com/{user}", num_f, num_p, cat, niche, "FOLLOWING"])
+                        
+                        if total_now >= MAX_LEADS_PER_TARGET:
+                            return True, leads_added_this_session
 
                     time.sleep(random.uniform(2, 4)) 
-
                 except Exception as e:
-                    print(f" [SKIP] Error: {e}")
-                    # Recuperación de emergencia
+                    print(f" [SKIP] Err: {e}")
                     try:
                         while len(driver.window_handles) > 1:
                             driver.switch_to.window(driver.window_handles[-1])
                             driver.close()
                         driver.switch_to.window(main_window)
-                    except: 
-                        return False 
+                    except: return False, leads_added_this_session
 
             if last_element_found:
-                try:
-                    driver.execute_script("arguments[0].scrollIntoView(true);", last_element_found)
+                try: driver.execute_script("arguments[0].scrollIntoView(true);", last_element_found)
                 except: pass
             
             time.sleep(random.uniform(1.5, 3))
             
-            if leads_in_session > 30: 
-                print("Rotando cuenta por seguridad...")
-                return False 
+            # --- SEGURIDAD DE SESIÓN (RESTABLECIDA) ---
+            if leads_added_this_session >= SAFETY_SESSION_LIMIT:
+                print(f"   [SEGURIDAD] Límite de {SAFETY_SESSION_LIMIT} leads por sesión alcanzado. Rotando cuenta...")
+                return False, leads_added_this_session
 
-        return True 
+        return True, leads_added_this_session
 
     except Exception as e:
         print(f"[ERROR CRITICO] {e}")
-        return False 
+        return False, leads_added_this_session
 
     finally:
         if driver: 
@@ -371,47 +368,52 @@ def run_scraper_session(account, total_leads_found):
         if os.path.exists(plugin_path): shutil.rmtree(plugin_path)
 
 def main():
-    print(f"--- SCRAPER SEGUIDOS (DIR: {RESULTS_DIR}) ---")
-    
-    if not os.path.exists(CSV_FILENAME):
-        with open(CSV_FILENAME, 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.writer(f, delimiter=';')
-            writer.writerow(["Usuario", "URL", "Seguidores", "Publicaciones", "Categoria", "Origen"])
-    
-    current_leads = 0
-    if os.path.exists(CSV_FILENAME):
-        with open(CSV_FILENAME, 'r', encoding='utf-8-sig') as f:
-            rows = list(csv.reader(f, delimiter=';'))
-            current_leads = max(0, len(rows) - 1)
-    
+    print(f"--- SCRAPER MULTI-TARGET ---")
     accounts = load_accounts()
-    
-    if not accounts:
-        print("ERROR: No hay cuentas válidas en cuentas.json")
-        return
+    if not accounts: return
 
-    print(f"Cargadas {len(accounts)} cuentas con SessionID.")
+    scraper_acc_index = 0
 
-    acc_index = 0
-    while current_leads < MAX_LEADS:
-        if acc_index >= len(accounts):
-            print("Ciclo de cuentas terminado. Esperando 5 min...")
-            time.sleep(300)
-            acc_index = 0
+    for target in TARGET_PROFILES:
+        _, csv_filename, _ = get_target_paths(target)
+        if not os.path.exists(csv_filename):
+            with open(csv_filename, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow(["Usuario", "URL", "Seguidores", "Publicaciones", "Categoria", "Nicho", "Origen"])
+
+        current_leads = 0
+        if os.path.exists(csv_filename):
+            with open(csv_filename, 'r', encoding='utf-8-sig') as f:
+                rows = list(csv.reader(f, delimiter=';'))
+                current_leads = max(0, len(rows) - 1)
         
-        current_acc = accounts[acc_index]
-        success = run_scraper_session(current_acc, current_leads)
-        
-        if success and current_leads >= MAX_LEADS:
-            break
-        
-        acc_index += 1
-        with open(CSV_FILENAME, 'r', encoding='utf-8-sig') as f:
-            rows = list(csv.reader(f, delimiter=';'))
-            current_leads = max(0, len(rows) - 1)
-        
-        print(f"Total Leads: {current_leads}/{MAX_LEADS}. Cambiando cuenta...")
-        time.sleep(5)
+        print(f"\n>>> PROCESANDO TARGET: {target} | Leads actuales: {current_leads}/{MAX_LEADS_PER_TARGET}")
+
+        if current_leads >= MAX_LEADS_PER_TARGET: continue
+
+        while current_leads < MAX_LEADS_PER_TARGET:
+            if scraper_acc_index >= len(accounts):
+                print("Ciclo de cuentas terminado. Esperando 5 min...")
+                time.sleep(300)
+                scraper_acc_index = 0
+            
+            current_acc = accounts[scraper_acc_index]
+            success, leads_found_session = run_scraper_session(current_acc, current_leads, target)
+            current_leads += leads_found_session
+            
+            if current_leads >= MAX_LEADS_PER_TARGET: break
+            
+            # Si success es True, significa que se agotó la lista o hubo bloqueo de carga
+            # por lo tanto debemos romper el bucle y pasar al SIGUIENTE TARGET.
+            if success:
+                print(f"   Target {target} finalizado (objetivo alcanzado o lista agotada).")
+                break 
+            
+            # Si success es False, significa rotación por seguridad (30 leads) o error puntual,
+            # seguimos en el bucle 'while' con el MISMO TARGET pero cambiamos de cuenta.
+            scraper_acc_index += 1
+            print(f"   Cambiando cuenta de scraping (mismo Target)...")
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
