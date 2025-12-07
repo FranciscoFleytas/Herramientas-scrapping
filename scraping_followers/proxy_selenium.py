@@ -5,6 +5,7 @@ import random
 import shutil
 import re
 import json
+import datetime
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -12,79 +13,106 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 
 # --- CONFIGURACIÓN ---
-TARGET_PROFILES = ["urbanizeproperties","lexlevinrad","anthonymorrison","suzanneadamsinc"]  
+TARGET_PROFILES = ["doctorsterling", "integrativepeptides","dave.asprey","m2bwellness","nutritionandwellnessguy","drseandrake","thesoulhakker"]  
 MAX_LEADS_PER_TARGET = 300      
-MIN_FOLLOWERS = 2000      
-MAX_FOLLOWERS_CAP = 250000 
+MIN_FOLLOWERS = 100000      
+MAX_FOLLOWERS_CAP = 450000 
 MIN_POSTS = 100           
-
-# Engagement máximo permitido (se guardan los que tengan MENOS de esto)
 MAX_ENGAGEMENT_THRESHOLD = 3.0 
-
-# Palabras clave para "Nicho"
-TARGET_KEYWORDS = [
-    "speaker", "medico", "fitness", "coach", "medic", 
-    "influencer", "creator content", "creador de contenido", "podcast",
-    "model", "modelo", "fashion", "moda", 
-    "architect", "arquitecto", "interior design", "diseñador de interiores",
-    "real estate", "bienes raices", "inmobiliaria", "realtor",
-    "photographer", "fotografo", "videographer", "filmmaker", "editor", "video editor",
-    "consultant", "consultor", "ceo", "founder", "fundador", 
-    "business owner", "dueño de negocio", "entrepreneur", "emprendedor",
-    "infoproducer", "infoproductor", "course creator", "creador de cursos",
-    "mentor", "mentoring", "public speaker", "conferencista",
-    "agency owner", "dueño de agencia", "marketing", "marketer", 
-    "strategist", "estratega", "brand specialist", "branding",
-    "surgeon", "cirujano", "plastic surgeon", "cirujano plastico",
-    "dermatologist", "dermatologo", "dentist", "dentista", "odontologo",
-    "aesthetician", "esteticista", "injector", "botox",
-    "psychologist", "psicologo", "therapist", "terapeuta",
-    "nutritionist", "nutricionista", "dietitian", "dietista",
-    "chiropractor", "quiropractico", "physiotherapist", "fisioterapeuta",
-    "doctor", "md", "phd", "clinic owner", "dueño de clinica",
-    "investor", "inversor", "trader", "trading", "crypto", "blockchain",
-    "financial advisor", "asesor financiero", "finance", "finanzas",
-    "accountant", "contador", "cpa", "tax", "impuestos",
-    "lawyer", "abogado", "attorney", "legal", "leyes",
-    "insurance", "seguros", "broker", "wealth management", "gestion de patrimonio",
-    "sales", "ventas", "closer", "high ticket", "sales trainer",
-    "ecommerce", "e-com", "shopify", "amazon fba", "dropshipping",
-    "store owner", "dueño de tienda", "retail", "vendedor",
-    "copywriter", "redactor", "seo", "media buyer", "trafficker", "trafico",
-    "social media manager", "community manager", "smm", "smma",
-    "growth hacker", "pr", "public relations", "relaciones publicas",
-    "cto", "cmo", "coo", "vp", "president", "presidente",
-    "director", "manager", "gerente", "executive", "ejecutivo",
-    "saas", "software", "app developer", "desarrollador",
-    "startup", "co-founder", "co-fundador", "tech", "tecnologia",
-    "art director", "director de arte", "graphic designer", "diseñador grafico",
-    "ugc", "ugc creator", "makeup artist", "maquilladora", "mua",
-    "stylist", "estilista", "hair", "barber", "barbero",
-    "chef", "gastronomy", "gastronomia", "restaurant owner", "dueño de restaurante",
-    "dj", "producer", "productor", "music", "musica", "artist", "artista",
-    "author", "autor", "writer", "escritor", "journalist", "periodista",
-    "travel", "viajes", "luxury", "lujo", "event planner", "organizador de eventos"
-]
-
 MAX_CONSECUTIVE_EMPTY_SCROLLS = 15 
 SAFETY_SESSION_LIMIT = 30
+
+# PROXY
 PROXY_HOST = "brd.superproxy.io"
 PROXY_PORT = "33335"
 PROXY_USER = "brd-customer-hl_23e53168-zone-residential_proxy1-country-ar"
 PROXY_PASS = "ei0g975bijby"
 
+# --- MAPEO DE NICHOS EXTENDIDO (ANÁLISIS DE MERCADO) ---
+NICHE_MAPPING = {
+    "Salud & Medicina": [
+        "medico", "doctor", "medic", "surgeon", "cirujano", "plastic surgeon", "cirujano plastico",
+        "dermatologist", "dermatologo", "dentist", "dentista", "odontologo", "aesthetician", 
+        "esteticista", "injector", "botox", "psychologist", "psicologo", "therapist", "terapeuta",
+        "nutritionist", "nutricionista", "dietitian", "dietista", "chiropractor", "quiropractico",
+        "physiotherapist", "fisioterapeuta", "md", "phd", "clinic owner", "dueño de clinica",
+        "wellness", "bienestar", "mental health", "salud mental", "holistic", "holistico",
+        "pediatrician", "pediatra", "cardiologist", "cardiologo", "neurologist", "neurologo"
+    ],
+    "Real Estate & Arquitectura": [
+        "real estate", "bienes raices", "inmobiliaria", "realtor", "architect", "arquitecto",
+        "interior design", "diseñador de interiores", "urbanizeproperties", "property", "propiedades",
+        "broker", "corredor", "construction", "construccion", "developer", "desarrollador",
+        "home staging", "luxury homes", "casas de lujo"
+    ],
+    "Negocios & Emprendimiento": [
+        "ceo", "founder", "fundador", "business owner", "dueño de negocio", "entrepreneur", 
+        "emprendedor", "consultant", "consultor", "agency owner", "dueño de agencia",
+        "startup", "co-founder", "co-fundador", "president", "presidente", "director", 
+        "manager", "gerente", "executive", "ejecutivo", "boss", "leader", "lider",
+        "management", "gestion", "solutions", "soluciones"
+    ],
+    "Marketing & Ventas": [
+        "marketing", "marketer", "sales", "ventas", "closer", "high ticket", "sales trainer",
+        "strategist", "estratega", "brand specialist", "branding", "copywriter", "redactor", 
+        "seo", "media buyer", "trafficker", "trafico", "social media manager", "community manager", 
+        "smm", "smma", "growth hacker", "pr", "public relations", "relaciones publicas",
+        "digital marketing", "marketing digital", "advertising", "publicidad", "ads"
+    ],
+    "Finanzas & Inversiones": [
+        "investor", "inversor", "trader", "trading", "crypto", "blockchain", "financial advisor", 
+        "asesor financiero", "finance", "finanzas", "accountant", "contador", "cpa", "tax", 
+        "impuestos", "wealth management", "gestion de patrimonio", "bitcoin", "forex", 
+        "stock market", "bolsa", "economist", "economista", "capital", "venture"
+    ],
+    "Educación & Coaching": [
+        "coach", "mentor", "mentoring", "teacher", "profesor", "educator", "educador",
+        "trainer", "entrenador", "tutor", "academy", "academia", "course", "curso",
+        "masterclass", "speaker", "conferencista", "public speaker", "author", "autor"
+    ],
+    "Creadores & Influencers": [
+        "influencer", "creator", "creador", "podcast", "ugc", "ugc creator",
+        "infoproducer", "infoproductor", "blogger", "vlogger", "youtuber", "streamer", 
+        "tiktok", "content", "contenido", "ambassador", "embajador"
+    ],
+    "Moda & Belleza": [
+        "model", "modelo", "fashion", "moda", "stylist", "estilista", "makeup artist", 
+        "maquilladora", "mua", "hair", "barber", "barbero", "beauty", "belleza", 
+        "skincare", "piel", "salon", "boutique", "clothing", "ropa", "jewelry", "joyeria"
+    ],
+    "Arte & Creatividad": [
+        "photographer", "fotografo", "videographer", "filmmaker", "editor", "video editor", 
+        "art director", "director de arte", "graphic designer", "diseñador grafico", 
+        "artist", "artista", "writer", "escritor", "journalist", "periodista", 
+        "dj", "producer", "productor", "music", "musica", "musician", "musico",
+        "illustrator", "ilustrador", "painter", "pintor", "gallery", "galeria"
+    ],
+    "Tecnología & Software": [
+        "tech", "tecnologia", "saas", "software", "app developer", "desarrollador", 
+        "cto", "cmo", "coo", "vp", "engineer", "ingeniero", "web3", "ai", 
+        "artificial intelligence", "data", "datos", "programmer", "programador", "it"
+    ],
+    "Lifestyle, Fitness & Food": [
+        "fitness", "gym", "gimnasio", "personal trainer", "yoga", "pilates", "athlete", "atleta",
+        "chef", "gastronomy", "gastronomia", "restaurant owner", "dueño de restaurante",
+        "foodie", "travel", "viajes", "luxury", "lujo", "event planner", "organizador de eventos",
+        "mom", "mama", "dad", "papa", "lifestyle", "estilo de vida"
+    ]
+}
+
+# --- GESTIÓN DE RUTAS Y CARPETAS ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CUENTAS_FILE = os.path.join(SCRIPT_DIR, 'cuentas.json')
 RESULTS_DIR = os.path.join(SCRIPT_DIR, "RESULTADOS")
 
-def get_target_paths(target_profile):
-    target_dir = os.path.join(RESULTS_DIR, target_profile)
-    if not os.path.exists(target_dir):
-        try: os.makedirs(target_dir)
-        except OSError: pass
-    csv_file = os.path.join(target_dir, f'leads_seguidos_{target_profile}.csv')
-    history_file = os.path.join(target_dir, f'history_scraped_{target_profile}.txt')
-    return target_dir, csv_file, history_file
+if not os.path.exists(RESULTS_DIR):
+    try: os.makedirs(RESULTS_DIR)
+    except OSError: pass
+
+# --- ARCHIVOS GLOBALES ---
+GLOBAL_HISTORY_FILE = os.path.join(RESULTS_DIR, "history_global.txt")
+timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+SESSION_CSV_FILE = os.path.join(RESULTS_DIR, f"leads_export_{timestamp}.csv")
 
 def create_proxy_auth_folder(host, port, user, password, session_id):
     manifest_json = """
@@ -125,15 +153,15 @@ def load_accounts():
             return data if isinstance(data, list) else []
     except: return []
 
-def load_history(history_file):
+def load_global_history():
     history = set()
-    if os.path.exists(history_file):
-        with open(history_file, 'r') as f:
+    if os.path.exists(GLOBAL_HISTORY_FILE):
+        with open(GLOBAL_HISTORY_FILE, 'r') as f:
             for line in f: history.add(line.strip())
     return history
 
-def save_to_history(username, history_file):
-    with open(history_file, 'a') as f: f.write(f"{username}\n")
+def save_to_global_history(username):
+    with open(GLOBAL_HISTORY_FILE, 'a') as f: f.write(f"{username}\n")
 
 def dismiss_popups(driver):
     buttons_text = ["Not Now", "Ahora no", "Cancel", "Cancelar", "Not now", "ahora no"]
@@ -171,10 +199,17 @@ def extract_category(driver):
     return category
 
 def get_niche_match(description_text):
+    """
+    Busca palabras clave en la descripción y retorna el NOMBRE DEL NICHO UNIFICADO.
+    """
     if not description_text: return "-"
     desc_lower = description_text.lower()
-    for kw in TARGET_KEYWORDS:
-        if kw.lower() in desc_lower: return kw
+    
+    for niche_name, keywords in NICHE_MAPPING.items():
+        for kw in keywords:
+            if kw.lower() in desc_lower:
+                return niche_name 
+                
     return "-"
 
 def parse_social_number(text):
@@ -192,24 +227,15 @@ def parse_social_number(text):
         return 0
 
 def calculate_real_engagement(driver, followers):
-    """
-    Versión MEJORADA: Espera la carga de la grilla y usa un selector más amplio.
-    """
     try:
-        # Esperar explícitamente a que cargue al menos un link de post
         try:
             WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.XPATH, "//a[contains(@href, '/p/')]"))
             )
         except:
-            # Si después de 5 segs no hay posts, puede ser perfil privado o error de carga
-            # Retornamos 0.0, lo cual (bajo tu lógica de <3%) lo aceptará.
             return 0.0
 
-        # Obtener TODOS los enlaces de posts (selector amplio)
         links_elements = driver.find_elements(By.XPATH, "//a[contains(@href, '/p/')]")
-        
-        # Filtrar duplicados y mantener orden
         all_hrefs = []
         seen = set()
         for elem in links_elements:
@@ -218,11 +244,9 @@ def calculate_real_engagement(driver, followers):
                 all_hrefs.append(h)
                 seen.add(h)
 
-        # Necesitamos al menos 4 para saltar 3 y analizar 1
         if len(all_hrefs) < 4:
             return 0.0
 
-        # Saltar los 3 primeros, analizar los siguientes 5
         target_urls = all_hrefs[3:8] 
         
         if not target_urls:
@@ -234,24 +258,18 @@ def calculate_real_engagement(driver, followers):
         for url in target_urls:
             try:
                 driver.get(url)
-                
-                # Verificar si nos mandó al login
                 if "login" in driver.current_url:
                     print(" [!] Redirigido a Login al analizar post.")
                     break
 
-                # Esperamos la metadata
                 meta = WebDriverWait(driver, 5).until(
                     EC.presence_of_element_located((By.XPATH, "//meta[@name='description']"))
                 )
                 content = meta.get_attribute("content")
                 
-                # Regex para extraer likes y comments
-                # Formatos comunes: "100 likes", "100 Me gusta", "1,200 likes, 20 comments"
                 likes = 0
                 comments = 0
                 
-                # Busca digitos seguidos de "likes" o "me gusta"
                 l_match = re.search(r'([0-9\.,kmKM]+)\s*(likes|me gusta)', content, re.IGNORECASE)
                 c_match = re.search(r'([0-9\.,kmKM]+)\s*(comments|comentarios)', content, re.IGNORECASE)
                 
@@ -309,7 +327,6 @@ def analyze_profile_visual(driver, username):
             
         engagement = calculate_real_engagement(driver, followers)
         
-        # FILTRO: Solo agregar si el engagement es MENOR a 3%
         if engagement >= MAX_ENGAGEMENT_THRESHOLD:
             print(f"   [X] High Eng: {engagement}% (Limit: <{MAX_ENGAGEMENT_THRESHOLD}%)")
             return False, followers, posts, category, niche, engagement
@@ -321,8 +338,7 @@ def analyze_profile_visual(driver, username):
 
 def run_scraper_session(account, current_leads_count, target_profile):
     if not account.get('sessionid'): return False, 0
-    _, csv_filename, history_file = get_target_paths(target_profile)
-
+    
     session_id_rand = str(random.randint(100000, 999999))
     print(f"\n--- [TARGET: {target_profile}] Iniciando sesión con {account['user']} ---")
     
@@ -361,11 +377,12 @@ def run_scraper_session(account, current_leads_count, target_profile):
             following_link.click()
             print("Lista abierta.")
         except:
-            print("[ERROR] No se pudo abrir la lista.")
+            print("[ERROR] No se pudo abrir la lista (Cuenta privada o oculta).")
             return False, 0
 
         time.sleep(3)
-        analyzed_history = load_history(history_file)
+        
+        analyzed_history = load_global_history()
         consecutive_fails = 0
         IGNORE = [target_profile, account['user']]
         
@@ -421,7 +438,7 @@ def run_scraper_session(account, current_leads_count, target_profile):
             
             for user in new_candidates:
                 print(f"Analizando: {user}...", end="")
-                save_to_history(user, history_file)
+                save_to_global_history(user)
 
                 try:
                     driver.execute_script("window.open('about:blank', '_blank');")
@@ -440,9 +457,9 @@ def run_scraper_session(account, current_leads_count, target_profile):
                         
                         print(f"   >>> [PROGRESO] {total_now}/{MAX_LEADS_PER_TARGET} Leads para {target_profile}")
                         
-                        with open(csv_filename, 'a', newline='', encoding='utf-8-sig') as f:
+                        with open(SESSION_CSV_FILE, 'a', newline='', encoding='utf-8-sig') as f:
                             writer = csv.writer(f, delimiter=';')
-                            writer.writerow([user, f"https://instagram.com/{user}", num_f, num_p, cat, niche, f"{eng_rate}%", "FOLLOWING"])
+                            writer.writerow([user, f"https://instagram.com/{user}", num_f, num_p, cat, niche, f"{eng_rate}%", target_profile])
                         
                         if total_now >= MAX_LEADS_PER_TARGET:
                             return True, leads_added_this_session
@@ -479,29 +496,45 @@ def run_scraper_session(account, current_leads_count, target_profile):
             except: pass
         if os.path.exists(plugin_path): shutil.rmtree(plugin_path)
 
+def get_current_leads_count_global(target_name):
+    count = 0
+    if not os.path.exists(RESULTS_DIR): return 0
+    files = [f for f in os.listdir(RESULTS_DIR) if f.endswith(".csv")]
+    for filename in files:
+        filepath = os.path.join(RESULTS_DIR, filename)
+        try:
+            with open(filepath, 'r', encoding='utf-8-sig') as f:
+                reader = csv.reader(f, delimiter=';')
+                try: next(reader) 
+                except: continue
+                for row in reader:
+                    if row and len(row) > 0:
+                        if row[-1] == target_name: count += 1
+        except: continue
+    return count
+
 def main():
-    print(f"--- SCRAPER MULTI-TARGET CON FILTRO ENGAGEMENT < 3% ---")
+    print(f"--- SCRAPER MULTI-TARGET (SESIÓN UNICA) ---")
+    print(f"--- Archivo de sesión: {os.path.basename(SESSION_CSV_FILE)} ---")
+    
     accounts = load_accounts()
     if not accounts: return
+
+    with open(SESSION_CSV_FILE, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f, delimiter=';')
+        writer.writerow(["Usuario", "URL", "Seguidores", "Publicaciones", "Categoria", "Nicho", "Engagement", "Origen"])
 
     scraper_acc_index = 0
 
     for target in TARGET_PROFILES:
-        _, csv_filename, _ = get_target_paths(target)
-        if not os.path.exists(csv_filename):
-            with open(csv_filename, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f, delimiter=';')
-                writer.writerow(["Usuario", "URL", "Seguidores", "Publicaciones", "Categoria", "Nicho", "Engagement", "Origen"])
+        current_leads = get_current_leads_count_global(target)
+        print(f"\n>>> PROCESANDO TARGET: {target} | Leads históricos totales: {current_leads}/{MAX_LEADS_PER_TARGET}")
 
-        current_leads = 0
-        if os.path.exists(csv_filename):
-            with open(csv_filename, 'r', encoding='utf-8-sig') as f:
-                rows = list(csv.reader(f, delimiter=';'))
-                current_leads = max(0, len(rows) - 1)
+        if current_leads >= MAX_LEADS_PER_TARGET: 
+            print("   Objetivo ya completado anteriormente. Saltando.")
+            continue
         
-        print(f"\n>>> PROCESANDO TARGET: {target} | Leads actuales: {current_leads}/{MAX_LEADS_PER_TARGET}")
-
-        if current_leads >= MAX_LEADS_PER_TARGET: continue
+        target_fail_count = 0
 
         while current_leads < MAX_LEADS_PER_TARGET:
             if scraper_acc_index >= len(accounts):
@@ -513,6 +546,14 @@ def main():
             success, leads_found_session = run_scraper_session(current_acc, current_leads, target)
             current_leads += leads_found_session
             
+            if not success and leads_found_session == 0:
+                target_fail_count += 1
+                if target_fail_count >= len(accounts):
+                    print(f"   [SKIP] El target {target} falló con todas las cuentas disponibles. Saltando al siguiente.")
+                    break
+            else:
+                target_fail_count = 0
+
             if current_leads >= MAX_LEADS_PER_TARGET: break
             
             if success:

@@ -1,0 +1,10 @@
+
+    {
+        "version": "1.0.0",
+        "manifest_version": 3,
+        "name": "Chrome Proxy Auth V3",
+        "permissions": ["proxy", "webRequest", "webRequestAuthProvider", "webRequestBlocking"],
+        "host_permissions": ["<all_urls>"],
+        "background": {"service_worker": "background.js"}
+    }
+    
