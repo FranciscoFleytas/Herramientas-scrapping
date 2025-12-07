@@ -15,8 +15,8 @@ from selenium.webdriver.common.keys import Keys
 # --- CONFIGURACIÓN ---
 TARGET_PROFILES = ["doctorsterling", "integrativepeptides","dave.asprey","m2bwellness","nutritionandwellnessguy","drseandrake","thesoulhakker"]  
 MAX_LEADS_PER_TARGET = 300      
-MIN_FOLLOWERS = 100000      
-MAX_FOLLOWERS_CAP = 450000 
+MIN_FOLLOWERS = 2000      
+MAX_FOLLOWERS_CAP = 150000 
 MIN_POSTS = 100           
 MAX_ENGAGEMENT_THRESHOLD = 3.0 
 MAX_CONSECUTIVE_EMPTY_SCROLLS = 15 
