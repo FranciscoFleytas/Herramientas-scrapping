@@ -14,10 +14,10 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 
 # --- CONFIGURACIÓN ---
-TARGET_PROFILES = ["shivanisikri","ergogenic_health","jacoblovesbeingalive","miss.kiaraphillips","christinecampbellpate","carolinemiddelsdorf","vaginacoach","the.biohackingconference", "coach_jerrykuykendall","drhalland","lizbagwell7","shaeleonard","jennamcinnes","ththetrailtohealthesoulhakker"]  
+TARGET_PROFILES = ["smart_propertychoices","blairgardner_","leo___bi","nathanwhennenrealestate","baldeepraywhite","withjessbrooks","mcgregorestateagents","boadrian","mark_vella_starrpartners","heims.com.au","chris_clarkebuyersagents","johnsonpropertyco","bruce.n.huang2.0","bendrayton_buyersagent","utsav_buyers_agent","4angelina.realty"]  
 MAX_LEADS_PER_TARGET = 300      
-MIN_FOLLOWERS = 2000      
-MAX_FOLLOWERS_CAP = 150000 
+MIN_FOLLOWERS = 1000      
+MAX_FOLLOWERS_CAP = 100000 
 MIN_POSTS = 100           
 MAX_ENGAGEMENT_THRESHOLD = 3.0 
 MAX_CONSECUTIVE_EMPTY_SCROLLS = 15 

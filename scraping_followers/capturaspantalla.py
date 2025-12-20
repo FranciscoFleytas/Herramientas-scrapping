@@ -5,17 +5,15 @@ import random
 import sys
 import subprocess
 import webbrowser
-import shutil  # Nueva librería para eliminar carpetas
+import shutil
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from docx import Document
-from docx.shared import Mm
-from PIL import Image
+from fpdf import FPDF
 
 # --- CONFIGURACIÓN ---
-BATCH_SIZE = 50  # Cantidad de perfiles por tanda
+BATCH_SIZE = 10
 MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
 WINDOW_WIDTH = 414
 WINDOW_HEIGHT = 896
@@ -70,6 +68,15 @@ def login_with_cookie(driver, account):
     except:
         time.sleep(2)
 
+def expand_bio(driver):
+    try:
+        expand_buttons = driver.find_elements(By.XPATH, "//span[contains(text(), 'more') or contains(text(), 'más')]")
+        for btn in expand_buttons:
+            driver.execute_script("arguments[0].click();", btn)
+            time.sleep(0.5)
+    except:
+        pass
+
 def crear_carpeta_sesion():
     if not os.path.exists(BASE_OUTPUT_DIR):
         os.makedirs(BASE_OUTPUT_DIR)
@@ -93,20 +100,25 @@ def capture_profile_views(driver, username, save_folder):
     try:
         WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "header")))
         
+        expand_bio(driver)
+        
+        # Foto 1
         path_header = os.path.join(user_folder, "01_header.png")
         driver.save_screenshot(path_header)
         captured_images.append(path_header)
         print(f"| F1", end=" ")
 
+        # Foto 2
         driver.execute_script(f"window.scrollBy(0, {WINDOW_HEIGHT * 0.8});") 
-        time.sleep(0.8)
+        time.sleep(1.5)
         path_grid = os.path.join(user_folder, "02_grid.png")
         driver.save_screenshot(path_grid)
         captured_images.append(path_grid)
         print(f"| F2", end=" ")
 
+        # Foto 3
         driver.execute_script(f"window.scrollBy(0, {WINDOW_HEIGHT * 0.8});")
-        time.sleep(0.8)
+        time.sleep(1.5)
         path_grid_2 = os.path.join(user_folder, "03_grid_more.png")
         driver.save_screenshot(path_grid_2)
         captured_images.append(path_grid_2)
@@ -117,50 +129,44 @@ def capture_profile_views(driver, username, save_folder):
 
     return captured_images
 
-def comprimir_imagen(ruta_png, calidad=65):
-    try:
-        ruta_jpg = ruta_png.replace(".png", ".jpg")
-        if os.path.exists(ruta_jpg): return ruta_jpg
-        with Image.open(ruta_png) as img:
-            img = img.convert("RGB")
-            img.save(ruta_jpg, "JPEG", quality=calidad, optimize=True)
-        return ruta_jpg
-    except:
-        return ruta_png
-
-def generate_word_report(session_folder, data_map, batch_number):
-    print(f"\n--- Generando Word Parte {batch_number} ---")
-    doc = Document()
-    section = doc.sections[0]
-    section.page_width = Mm(297)
-    section.page_height = Mm(420)
-    section.left_margin = Mm(15)
-    section.right_margin = Mm(15)
-    section.top_margin = Mm(15)
-    section.bottom_margin = Mm(15)
-
-    doc.add_heading(f'Reporte de Perfiles - Parte {batch_number}', 0)
-
-    for username, images in data_map.items():
-        doc.add_heading(f"Perfil: {username}", level=1)
-        if len(images) > 0:
-            table = doc.add_table(rows=1, cols=3)
-            table.autofit = True
-            for i, img_path in enumerate(images):
-                if i < 3 and os.path.exists(img_path):
-                    final_path = comprimir_imagen(img_path, calidad=65)
-                    cell = table.cell(0, i)
-                    paragraph = cell.paragraphs[0]
-                    run = paragraph.add_run()
-                    run.add_picture(final_path, width=Mm(85))
-        doc.add_page_break()
+def generate_pdf_report(session_folder, data_map, batch_number):
+    """
+    Genera un PDF donde CADA IMAGEN ocupa UNA PAGINA entera.
+    Mantiene los perfiles separados.
+    """
+    print(f"\n--- Generando PDF Parte {batch_number} ---")
     
-    report_path = os.path.join(session_folder, f"Reporte_Parte_{batch_number}.docx")
-    doc.save(report_path)
-    print(f"✅ DOC GUARDADO: {report_path}")
+    # Usamos A3 para tener alta resolución, Portrait (vertical)
+    # A3 size: 297mm x 420mm
+    pdf = FPDF(orientation="P", unit="mm", format="A3")
+    pdf.set_auto_page_break(auto=True, margin=10)
+    
+    for username, images in data_map.items():
+        # Iteramos sobre cada imagen del usuario
+        for i, img_path in enumerate(images):
+            if os.path.exists(img_path):
+                pdf.add_page()
+                
+                # Título en la parte superior de cada página
+                pdf.set_font("Helvetica", style="B", size=18)
+                pdf.cell(0, 15, txt=f"{username} - Captura {i+1}", ln=True, align='C')
+                
+                try:
+                    # Insertar imagen.
+                    # Al ser capturas de móvil (alargadas), definimos la ALTURA (h) 
+                    # para que quepa en la página y el ancho se ajusta solo (proporcional).
+                    # Altura A3 (420) - Margen Título (20) - Margen inf (10) = ~390mm disponible.
+                    # Centramos horizontalmente aprox (x=65) o dejamos x por defecto.
+                    # x=65 centra una captura de iPhone típica en una hoja A3.
+                    pdf.image(img_path, x=65, y=30, h=370)
+                except Exception as e:
+                    print(f"Error imagen PDF: {e}")
+
+    report_path = os.path.join(session_folder, f"Reporte_Parte_{batch_number}.pdf")
+    pdf.output(report_path)
+    print(f"✅ PDF GUARDADO: {report_path}")
 
 def generar_txt_tanda(session_folder, profiles_list, batch_number):
-    """Genera el TXT correspondiente a la tanda actual."""
     txt_filename = f"textos_analizados_parte_{batch_number}.txt"
     txt_path = os.path.join(session_folder, txt_filename)
     try:
@@ -174,18 +180,14 @@ def generar_txt_tanda(session_folder, profiles_list, batch_number):
         print(f"Error TXT: {e}")
 
 def limpiar_archivos_temporales(session_folder, profiles_list):
-    """Elimina las carpetas de imágenes de los usuarios ya procesados para ahorrar espacio."""
-    print("🧹 Limpiando imágenes temporales de esta tanda...", end=" ")
-    count = 0
+    print("🧹 Limpiando temp...", end=" ")
     for username in profiles_list:
         user_folder = os.path.join(session_folder, username)
         if os.path.exists(user_folder):
             try:
-                shutil.rmtree(user_folder) # Elimina carpeta y contenido
-                count += 1
-            except Exception as e:
-                print(f"[x] Error borrando {username}: {e}")
-    print(f"({count} carpetas eliminadas)")
+                shutil.rmtree(user_folder)
+            except: pass
+    print("OK")
 
 def main():
     account = load_account()
@@ -200,12 +202,11 @@ def main():
     try:
         login_with_cookie(driver, account)
         
-        # Iterar por lotes (Chunks)
         for i in range(0, len(target_profiles), BATCH_SIZE):
             current_batch = target_profiles[i : i + BATCH_SIZE]
             batch_num = (i // BATCH_SIZE) + 1
             
-            print(f"\n>>> INICIANDO LOTE {batch_num} (Perfiles {i+1} a {i+len(current_batch)})")
+            print(f"\n>>> LOTE {batch_num} (Perfiles {i+1}-{i+len(current_batch)})")
             
             batch_data = {} 
             for user in current_batch:
@@ -213,19 +214,18 @@ def main():
                 batch_data[user] = images
                 time.sleep(random.uniform(1.0, 2.0))
             
-            # 1. Generar Word (las imágenes se insertan en el docx)
-            generate_word_report(current_session_folder, batch_data, batch_num)
+            # Generar PDF
+            generate_pdf_report(current_session_folder, batch_data, batch_num)
             
-            # 2. Generar TXT de la tanda
+            # Generar TXT
             generar_txt_tanda(current_session_folder, batch_data.keys(), batch_num)
             
-            # 3. Limpieza: Eliminar las carpetas de imágenes de ESTE lote
-            # (El Word ya está guardado, así que es seguro borrarlas)
+            # Limpieza
             limpiar_archivos_temporales(current_session_folder, batch_data.keys())
             
             del batch_data
         
-        print("\n--- Abriendo carpeta y Gemini ---")
+        print("\n--- Finalizando ---")
         if sys.platform.startswith('linux'):
             subprocess.Popen(['xdg-open', current_session_folder])
         webbrowser.open(GEMINI_URL)
@@ -234,7 +234,7 @@ def main():
         print(f"Error global: {e}")
     finally:
         driver.quit()
-        print("\n" + "="*40 + "\nPROCESO FINALIZADO\n" + "="*40)
+        print("\n=== PROCESO FINALIZADO ===")
 
 if __name__ == "__main__":
     main()
