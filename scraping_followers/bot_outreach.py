@@ -176,27 +176,36 @@ def get_real_name_and_bio(driver, fallback_name):
 # ==========================================
 
 def generate_ai_message(real_name, bio_text):
+    # Prompt optimizado para Tier A - BBI Style (No Emojis / No Fillers)
     prompt = f"""
-    Objetivo: Mensaje de networking Instagram (DM).
+    Objetivo: Mensaje de transición/profundización en Instagram DM.
     Prospecto (Nombre Real): {real_name}.
     Bio: "{bio_text}".
     
-    INSTRUCCIONES CLAVE DE ESTILO:
-    1. Usa el PRIMER NOMBRE de la persona (ej: si es "Juan Perez", di "Juan"). Si el nombre es una marca, úsalo tal cual.
-    2. Usa oraciones completas y fluidas.
-    3. Usa comas (,) para conectar las ideas.
-    4. Estructura obligatoria: "[Nombre] you have [Elogio Completo], [Observación] | [Pregunta Completa]?"
-    5. Debes generar el mensaje en DOS PARTES separadas por el simbolo "|".
+    INSTRUCCIONES DE ESTILO (BBI Standard):
+    1. Usa estrictamente el PRIMER NOMBRE (ej: si es "Juan Perez", usa "Juan")[cite: 190, 198].
+    2. Tono masculino, profesional y premium[cite: 45, 59, 180].
+    3. Elimina "relleno", exageraciones y preguntas suaves[cite: 41, 186].
+    4. Estructura: [Nombre] you have [Elogio Específico], [Observación de potencial/dolor suave] | [Invitación a profundizar]?[cite: 57, 132, 158].
+    5. Formato: Generar exactamente DOS PARTES separadas por el símbolo "|".
 
-    REGLAS:
+    REGLAS ESTRICTAS:
     - IDIOMA: Inglés (English).
-    - NO Emojis.
+    - SIN EMOJIS (No emojis at all)[cite: 48, 62, 183].
+    - SIN SALUDOS GENÉRICOS (No "Hi", "Hello", "Hey")[cite: 41, 125, 186].
+    - El mensaje debe invitar a seguir la charla técnica/estratégica, no a "iniciar" una conversación privada.
+
+    EJEMPLOS DE REFERENCIA:
+    - "{real_name} you have a remarkably polished aesthetic, but the exposure doesn't fully reflect that standard | if you're open, I can share how the method applies to your profile?"[cite: 307, 326].
+    - "{real_name} you have extremely intentional content, though visibility seems modest compared to your execution | would you be open to hearing how we align visibility with quality?"[cite: 309, 360].
     """
     try:
         response = model.generate_content(prompt)
+        # Limpieza de posibles caracteres extraños
         return response.text.strip().replace('"', '')
-    except:
-        return f"{real_name} you have powerful visuals | Are you open to sharing some ideas?"
+    except Exception as e:
+        print(f"Error en Gemini: {e}")
+        return f"{real_name} you have an impressive brand presence, yet the reach seems inconsistent | would you be open to a brief exchange about this?"
 
 def clean_message_part(text):
     text = text.strip()
