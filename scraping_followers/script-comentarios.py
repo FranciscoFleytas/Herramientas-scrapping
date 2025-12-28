@@ -12,10 +12,7 @@ from selenium.common.exceptions import StaleElementReferenceException
 import google.generativeai as genai
 
 # --- CONFIGURACION ---
-# 1. LINK DEL POST
-TARGET_POST_URL = "https://www.instagram.com/p/DEp92mTRRjZ/" 
-
-# 2. API KEY
+TARGET_POST_URL = "https://www.instagram.com/p/DQ7JXQHDfx8/" 
 GEMINI_API_KEY = "AIzaSyCAn6MmtSo9mkVzWOcO0KOdcnRD9U7KB-g"
 
 # --- OPCIONES ---
@@ -31,34 +28,24 @@ genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 # ==========================================
-# 1. UTILIDADES ANTI-BOT ROBUSTAS
+# 1. UTILIDADES ANTI-BOT
 # ==========================================
 
 def human_type_robust(driver, xpath, text):
-    """
-    Escribe texto letra por letra, pero si el elemento se vuelve 'stale' (viejo),
-    lo busca de nuevo y continua.
-    """
     wait = WebDriverWait(driver, 10)
-    
-    # Intentamos encontrar el elemento fresco
-    element = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
-    
-    # Intentamos dar click para foco
     try:
+        element = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
         element.click()
-    except:
-        pass
+    except: pass
 
     for char in text:
         try:
             element.send_keys(char)
-            time.sleep(random.uniform(0.03, 0.08))
+            time.sleep(random.uniform(0.02, 0.07))
         except StaleElementReferenceException:
-            # Si falla, recuperamos el elemento y reintentamos la letra
             element = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
             element.send_keys(char)
-            time.sleep(random.uniform(0.03, 0.08))
+            time.sleep(random.uniform(0.02, 0.07))
 
 def dismiss_popups(driver):
     textos = ["Ahora no", "Not Now", "Cancelar", "Cancel", "Activar"]
@@ -81,7 +68,6 @@ def setup_driver():
     options.add_argument(f'--user-agent={DESKTOP_UA}')
     options.add_argument("--disable-notifications")
     options.add_argument("--lang=es-AR") 
-    
     if MODO_HEADLESS:
         options.add_argument('--headless=new')
 
@@ -89,13 +75,14 @@ def setup_driver():
     driver.set_window_size(1280, 850)
     return driver
 
-def load_account():
-    if not os.path.exists(CUENTAS_FILE): return None
+def load_all_accounts():
+    if not os.path.exists(CUENTAS_FILE): return []
     try:
         with open(CUENTAS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            return data[0] if isinstance(data, list) and len(data) > 0 else None
-    except: return None
+            if isinstance(data, list): return data
+            return []
+    except: return []
 
 def login_with_cookie(driver, account):
     print(f"--- Logueando como {account['user']} ---")
@@ -114,51 +101,86 @@ def login_with_cookie(driver, account):
     dismiss_popups(driver)
 
 # ==========================================
-# 3. CONTEXTO Y COMENTARIO
+# 3. LÓGICA DE LECTURA Y GENERACIÓN DE COMENTARIO
 # ==========================================
 
 def get_post_context(driver):
-    context = {"author": "Creator", "caption": "", "image_desc": "Visual content"}
+    """
+    Extrae la descripcion (Caption) para entender el tema del post.
+    """
+    context = {"caption": "", "image_desc": ""}
     try:
-        try:
-            author_elem = driver.find_element(By.XPATH, "//header//a")
-            context["author"] = author_elem.text
-        except: pass
-
+        # Intentamos leer el H1 que suele contener el usuario + la descripcion
+        # Este es el metodo mas comun en posts individuales
         try:
             caption_elem = driver.find_element(By.TAG_NAME, "h1")
             context["caption"] = caption_elem.text
-        except: pass
+        except: 
+            # Fallback: buscar dentro de la lista de items (ul) si es un Reel o vista modal
+            try:
+                caption_elem = driver.find_element(By.XPATH, "//div[@role='button']//span | //ul//li//span")
+                if len(caption_elem.text) > 5: # Filtro basico de longitud
+                    context["caption"] = caption_elem.text
+            except: pass
 
+        # Leemos el Alt Text de la imagen como respaldo
         try:
             img_elem = driver.find_element(By.XPATH, "//article//img")
             alt = img_elem.get_attribute("alt")
             if alt: context["image_desc"] = alt
         except: pass
-        
-    except Exception as e:
-        print(f"   [WARN] Contexto parcial: {e}")
 
+    except: pass
     return context
 
 def generate_ai_comment(post_context):
+    
+    text_angles = [
+        "FOCUS: Agree strongly with the main point of the text.",
+        "FOCUS: Pick a specific keyword from the caption and mention it.",
+        "FOCUS: Compliment the clarity of their explanation.",
+        "FOCUS: Add a short supportive statement about the topic.",
+        "FOCUS: Mention how this advice is valuable for the niche.",
+        "FOCUS: Minimalist agreement (3-5 words).",
+        "FOCUS: Highlight the mindset behind the text.",
+        "FOCUS: Express gratitude for sharing this insight.",
+        "FOCUS: Relate the text to the visual quality.",
+        "FOCUS: Professional acknowledgment of the strategy."
+    ]
+    
+    common_words = ["good", "great", "nice", "love", "awesome", "amazing", "true", "agree", "thanks", "perfect"]
+    forbidden = random.sample(common_words, 3)
+    
+    selected_angle = random.choice(text_angles)
+    
+    print(f"   [AI] Angulo: {selected_angle}")
+
     prompt = f"""
-    ROLE: Expert Instagram Strategist (Tier A).
-    TASK: Write a comment for an Instagram post.
+    ROLE: Expert Social Media User.
+    TASK: Write a comment for an Instagram post based on its DESCRIPTION (Caption).
+    
     POST CONTEXT:
-    - Visual: "{post_context.get('image_desc')}"
-    - Caption: "{post_context.get('caption')}"
-    RULES:
+    - Caption (Text written by author): "{post_context.get('caption')}"
+    - Visual Context (Backup): "{post_context.get('image_desc')}"
+    
+    INSTRUCTION:
+    1. Read the 'Caption' carefully to understand the TOPIC.
+    2. Write a comment that proves you read the text.
+    3. Follow this specific angle: {selected_angle}
+    
+    CONSTRAINTS:
     1. Language: ENGLISH ONLY.
-    2. NO EMOJIS (Strict).
-    3. Length: 1 short sentence.
-    4. Connect to the visual content.
+    2. NO EMOJIS.
+    3. DO NOT use these words: {forbidden}.
+    4. Keep it natural and short (1 sentence).
+    5. If the caption is empty, comment on the visual aesthetic instead.
     """
     try:
         response = model.generate_content(prompt)
-        return response.text.strip().replace('"', '')
+        text = response.text.strip().replace('"', '').replace("Comment:", "")
+        return text
     except:
-        return "Clean aesthetic, the execution here is top tier."
+        return "This perspective is really valuable."
 
 def make_comment(driver, url):
     print(f"Visitando Post: {url}")
@@ -166,50 +188,48 @@ def make_comment(driver, url):
     time.sleep(random.uniform(5, 7))
     dismiss_popups(driver)
     
-    print("   Leyendo imagen y texto...")
+    print("   Analizando descripcion del post...")
     context = get_post_context(driver)
+    
+    # --- LOG DE DEPURACION (SOLICITADO) ---
+    print("\n" + "="*40)
+    print(f"[DEBUG] DESCRIPCION ENCONTRADA:\n{context['caption']}")
+    print("="*40 + "\n")
+    # --------------------------------------
     
     comment_text = generate_ai_comment(context)
     print(f"Gemini Sugiere: {comment_text}")
     
     wait = WebDriverWait(driver, 10)
-
-    print("   Buscando caja de comentarios...")
+    print("   Buscando caja...")
     
-    # SELECTOR
     xpath_area = "//textarea[@aria-label='Agrega un comentario...']"
     
     try:
-        # 1. ENCONTRAR (Primer intento)
         comment_box = wait.until(EC.presence_of_element_located((By.XPATH, xpath_area)))
         
-        # 2. INTENTO DE CLICK SEGURO (Manejando Stale)
         try:
             actions = ActionChains(driver)
             actions.move_to_element(comment_box).click().perform()
         except StaleElementReferenceException:
-            print("   Elemento vencido (stale) al hacer click. Refrescando...")
             comment_box = wait.until(EC.presence_of_element_located((By.XPATH, xpath_area)))
             ActionChains(driver).move_to_element(comment_box).click().perform()
 
-        time.sleep(1) # Esperar a que la UI reaccione al click
+        time.sleep(1)
         
-        # 3. ESCRIBIR (Usando funcion robusta que maneja Stale internamente)
         print("   Escribiendo...")
         human_type_robust(driver, xpath_area, comment_text)
         time.sleep(random.uniform(1, 2))
         
-        # 4. ENTER (Manejando Stale tambien aqui)
-        print("   Enviando con ENTER...")
+        print("   Enviando...")
         try:
             comment_box.send_keys(Keys.ENTER)
         except StaleElementReferenceException:
-            print("   Elemento vencido al dar Enter. Refrescando...")
             comment_box = wait.until(EC.presence_of_element_located((By.XPATH, xpath_area)))
             comment_box.send_keys(Keys.ENTER)
         
         time.sleep(4) 
-        print("Comentario finalizado.")
+        print("Comentario enviado.")
         return True
 
     except Exception as e:
@@ -221,24 +241,41 @@ def make_comment(driver, url):
 # ==========================================
 
 def main():
-    print(f"Iniciando Bot Comentarios (Anti-Stale)...")
+    print(f"Iniciando Bot (Debug Descripcion)...")
     
-    account = load_account()
-    if not account: 
+    accounts = load_all_accounts()
+    if not accounts: 
         print("Falta archivo cuentas.json")
         return
 
-    driver = setup_driver()
-    
-    try:
-        login_with_cookie(driver, account)
-        make_comment(driver, TARGET_POST_URL)
+    print(f"Cuentas cargadas: {len(accounts)}")
+
+    for i, account in enumerate(accounts):
+        print(f"==========================================")
+        print(f"CUENTA {i+1}/{len(accounts)}: {account.get('user')}")
+        print(f"==========================================")
+        
+        driver = setup_driver()
+        try:
+            login_with_cookie(driver, account)
+            success = make_comment(driver, TARGET_POST_URL)
             
-    except Exception as e:
-        print(f"Error Global: {e}")
-    finally:
-        print("Cerrando navegador...")
-        driver.quit()
+            if success:
+                print(f"Exito: {account.get('user')}")
+            else:
+                print(f"Fallo: {account.get('user')}")
+        except Exception as e:
+            print(f"Error critico: {e}")
+        finally:
+            print("Cerrando...")
+            driver.quit()
+        
+        if i < len(accounts) - 1:
+            wait_time = random.uniform(15, 25)
+            print(f"Pausa de seguridad: {int(wait_time)}s...")
+            time.sleep(wait_time)
+
+    print("--- PROCESO TERMINADO ---")
 
 if __name__ == "__main__":
     main()
