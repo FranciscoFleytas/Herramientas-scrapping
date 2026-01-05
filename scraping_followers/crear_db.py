@@ -4,7 +4,7 @@ import pickle
 
 # --- RUTA AUTOMÁTICA ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-JSON_FILE = os.path.join(SCRIPT_DIR, 'cuentas.json')
+JSON_FILE = os.path.join(SCRIPT_DIR, 'cuentas2.json')
 
 def find_session_id_recursive(data):
     """Busca 'sessionid' en cualquier rincón de la estructura de datos."""

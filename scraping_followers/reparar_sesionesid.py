@@ -18,7 +18,7 @@ CUENTAS_A_REPARAR = [
 
 # --- RUTA DE SALIDA ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-JSON_FILE = os.path.join(SCRIPT_DIR, 'cuentas.json')
+JSON_FILE = os.path.join(SCRIPT_DIR, 'cuentas2.json')
 
 def obtener_session_id(account):
     print(f"\n>>> Procesando: {account['user']}...")
