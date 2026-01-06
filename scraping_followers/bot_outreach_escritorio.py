@@ -215,24 +215,11 @@ def tg_answer_callback(callback_query_id: str, text: str = "") -> None:
         pass
 
 def tg_buttons_for(approval_id: str, mode: str = "default") -> dict:
-    if mode == "post_edit":
-        return {
-            "inline_keyboard": [
-                [
-                    {"text": "✅ Aprobar envío", "callback_data": f"approve:{approval_id}"},
-                    {"text": "❌ Rechazar", "callback_data": f"reject:{approval_id}"},
-                ],
-                [
-                    {"text": "✍️ Editar de nuevo", "callback_data": f"edit:{approval_id}"}
-                ]
-            ]
-        }
     return {
         "inline_keyboard": [
             [
                 {"text": "✅ Aprobar", "callback_data": f"approve:{approval_id}"},
                 {"text": "❌ Rechazar", "callback_data": f"reject:{approval_id}"},
-                {"text": "✍️ Editar", "callback_data": f"edit:{approval_id}"},
             ]
         ]
     }
@@ -248,28 +235,18 @@ def tg_send_approval(chat_id: str, approval_id: str, lead_url: str, real_name: s
     )
     tg_send_message(chat_id, text, reply_markup=tg_buttons_for(approval_id, "default"))
 
-def tg_wait_decision_or_edit(approval_id: str, timeout_s: int) -> tuple[bool, str | None]:
+def tg_wait_decision(approval_id: str, timeout_s: int) -> bool:
     """
-    MISMA LOGICA:
-      (True, None) -> aprobado sin editar
-      (False, None) -> rechazado o timeout
-      (True, "texto...") -> aprobado con texto editado
-    OPTIMIZADO:
-      - long polling real (timeout 50)
-      - allowed_updates para menos payload
-      - offset GLOBAL para no releer backlog
-      - sin sleep(0.5)
+    Devuelve True si aprueban, False si rechazan o timeout.
     """
     global TG_OFFSET
 
     deadline = time.time() + timeout_s
-    awaiting_text = False
-    edited_text: str | None = None
 
     while time.time() < deadline:
         params = {
-            "timeout": 50,  # long-polling
-            "allowed_updates": ["callback_query", "message"],
+            "timeout": 50,
+            "allowed_updates": ["callback_query"],
         }
         if TG_OFFSET is not None:
             params["offset"] = TG_OFFSET
@@ -279,7 +256,6 @@ def tg_wait_decision_or_edit(approval_id: str, timeout_s: int) -> tuple[bool, st
             r.raise_for_status()
             data = r.json()
         except Exception:
-            # micro backoff ante cortes
             time.sleep(0.2)
             continue
 
@@ -288,13 +264,11 @@ def tg_wait_decision_or_edit(approval_id: str, timeout_s: int) -> tuple[bool, st
             continue
 
         for upd in updates:
-            # avanzar offset global SIEMPRE
             try:
                 TG_OFFSET = upd["update_id"] + 1
             except Exception:
                 pass
 
-            # 1) Botones
             cq = upd.get("callback_query")
             if cq:
                 cb_data = cq.get("data", "")
@@ -302,45 +276,13 @@ def tg_wait_decision_or_edit(approval_id: str, timeout_s: int) -> tuple[bool, st
 
                 if cb_data == f"approve:{approval_id}":
                     tg_answer_callback(cq_id, "Aprobado ✅")
-                    return True, edited_text
+                    return True
 
                 if cb_data == f"reject:{approval_id}":
                     tg_answer_callback(cq_id, "Rechazado ❌")
-                    return False, None
+                    return False
 
-                if cb_data == f"edit:{approval_id}":
-                    tg_answer_callback(cq_id, "OK, enviá el texto nuevo ✍️")
-                    awaiting_text = True
-                    tg_send_message(
-                        TELEGRAM_CHAT_ID,
-                        "✍️ Modo edición\nRespondé con el texto final a enviar (un solo mensaje)."
-                    )
-                    continue
-
-            # 2) Texto (edición)
-            msg = upd.get("message")
-            if msg and awaiting_text:
-                try:
-                    if str(msg["chat"]["id"]) != str(TELEGRAM_CHAT_ID):
-                        continue
-                except Exception:
-                    pass
-
-                txt = (msg.get("text") or "").strip()
-                if not txt:
-                    continue
-
-                edited_text = txt
-                awaiting_text = False
-
-                preview = edited_text if len(edited_text) <= 3500 else (edited_text[:3500] + "…")
-                tg_send_message(
-                    TELEGRAM_CHAT_ID,
-                    f"📝 Texto editado recibido:\n\n{preview}",
-                    reply_markup=tg_buttons_for(approval_id, "post_edit")
-                )
-
-    return False, None
+    return False
 
 
 
@@ -368,12 +310,12 @@ def get_leads_to_write():
         return leads
     except: return []
 
-def update_lead_status(page_id):
+def update_lead_status(page_id, status=ESTADO_FINAL):
     url = f"https://api.notion.com/v1/pages/{page_id}"
     headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Content-Type": "application/json", "Notion-Version": "2022-06-28"}
-    payload = {"properties": {"Estado": {"status": {"name": ESTADO_FINAL}}, "Ultimo Mensaje": {"date": {"start": datetime.datetime.now().isoformat()}}}}
+    payload = {"properties": {"Estado": {"status": {"name": status}}, "Ultimo Mensaje": {"date": {"start": datetime.datetime.now().isoformat()}}}}
     requests.patch(url, json=payload, headers=headers)
-    print(f"[NOTION] Status actualizado.")
+    print(f"[NOTION] Status actualizado a: {status}.")
 
 # ==========================================
 # 4. DATOS REALES (Fixed Logic)
@@ -500,9 +442,10 @@ def send_dm(driver, lead):
                 bio_text=bio_text,
                 mensajes=mensajes
             )
-            ok, _ = tg_wait_decision_or_edit(approval_id, TELEGRAM_APPROVAL_TIMEOUT)
+            ok = tg_wait_decision(approval_id, TELEGRAM_APPROVAL_TIMEOUT)
             if not ok:
                 print("   [SKIP] Rechazado (o timeout) por Telegram.")
+                update_lead_status(lead['id'], "NO CUMPLE REQ")
                 return False
         except Exception as e:
             print(f"   [WARN] No se pudo pedir aprobacion por Telegram: {e}")
