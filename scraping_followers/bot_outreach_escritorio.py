@@ -246,21 +246,20 @@ def generate_ai_message(real_name, bio_text):
     # Prompt del Backup adaptado para Ollama (Inglés + Corto)
     prompt = f"""
     ROLE: Natural Instagram User.
-        TASK: Send a friendly, curious DM to {real_name}.
+        TASK: Send a friendly, curious DM.
         BIO CONTEXT: "{bio_text}"
         
-        MANDATORY FORMAT: [Statement] | [Question]?
+        MANDATORY FORMAT: [Statement] \n\n [Question]?
         You MUST use \n\n for line breaks
         
         RULES:
-        1. USE THE NAME "{real_name}" EXACTLY. Do not invent a new name (like Lena).
-        2. Tone: Casual, appreciative, direct. No marketing jargon.
-        3. NO generic greetings ("Hello", "Hi"). Start with the name.
-        4. NO Emojis.
+        1. Tone: Casual, appreciative, direct. No marketing jargon.
+        2. NO generic greetings ("Hello", "Hi"). Start with the statement.
+        3. NO Emojis.
         
         EXAMPLES:
-        - "{real_name} your content is super clean \n\n do you have help with the edits?"
-        - "{real_name} love the vibe of your profile \n\n is it just you managing this?"
+        - "your content is super clean \n\n do you have help with the edits?"
+        - "love the vibe of your profile \n\n is it just you managing this?"
     """
     
     api_url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
@@ -289,6 +288,7 @@ def send_dm(driver, lead):
     print(f"   [Prospecto] {real_name}")
 
     full_msg = generate_ai_message(real_name, bio_text)
+    full_msg = full_msg.replace('<br><br>', '\n\n')  # Filtro para convertir <br><br> en saltos de línea
     mensajes = [clean_message_part(p) for p in full_msg.split('\n') if p.strip()]
     
     if len(mensajes) > 2: mensajes = mensajes[:2] # Hard limit 2
