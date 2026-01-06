@@ -41,7 +41,7 @@ PROXY_PASS = os.getenv("BRIGHTDATA_PROXY_PASSWORD")
 # AI (Ollama)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
-OLLAMA_MODEL = os.getenv("OLLAMA_DEFAULT_MODEL", "ministral-3:8b")
+OLLAMA_MODEL = os.getenv("OLLAMA_DEFAULT_MODEL", "gemini-3-flash-preview:latest")
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "60"))
 
 # CONFIGURACION BOT
@@ -245,25 +245,22 @@ def get_real_name_and_bio(driver, lead):
 def generate_ai_message(real_name, bio_text):
     # Prompt del Backup adaptado para Ollama (Inglés + Corto)
     prompt = f"""
-    ROLE: Instagram Specialist.
-    TARGET: {real_name}. BIO: "{bio_text}".
-    
-    TASK: Write a 2-part message. 
-    1. Observation about their content/consistency (1 sentence).
-    2. Question about their workflow/strategy (1 sentence).
-    
-    RULES:
-    - NO fillers. NO "Hi", "Hello". Start with Name.
-    - NO "There". Use {real_name}.
-    - MAX 2 separate lines.
-    - NO Emojis.
-
-    REFERENCE EXAMPLES:
-    {real_name} your consistency with the training content is really inspiring.
-    How do you balance filming and recovery during prep?
-
-    {real_name} the quality of your reels is top-tier.
-    Do you have a dedicated video editor or are you handling production solo?
+    ROLE: Natural Instagram User.
+        TASK: Send a friendly, curious DM to {real_name}.
+        BIO CONTEXT: "{bio_text}"
+        
+        MANDATORY FORMAT: [Statement] | [Question]?
+        You MUST use \n\n for line breaks
+        
+        RULES:
+        1. USE THE NAME "{real_name}" EXACTLY. Do not invent a new name (like Lena).
+        2. Tone: Casual, appreciative, direct. No marketing jargon.
+        3. NO generic greetings ("Hello", "Hi"). Start with the name.
+        4. NO Emojis.
+        
+        EXAMPLES:
+        - "{real_name} your content is super clean \n\n do you have help with the edits?"
+        - "{real_name} love the vibe of your profile \n\n is it just you managing this?"
     """
     
     api_url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
