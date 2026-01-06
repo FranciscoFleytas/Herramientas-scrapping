@@ -153,7 +153,7 @@ def login_with_cookie(driver, account):
     time.sleep(2)
     driver.add_cookie({'name': 'sessionid', 'value': account['sessionid'], 'domain': '.instagram.com', 'path': '/', 'secure': True, 'httpOnly': True})
     driver.get("https://www.instagram.com/")
-    time.sleep(5)
+    time.sleep(2)
     dismiss_popups(driver)
     if "login" in driver.current_url:
         print("[ERROR] Cookie invalida.")
@@ -161,7 +161,7 @@ def login_with_cookie(driver, account):
     return True
 
 # ==========================================
-# TELEGRAM: APROBACION + EDITAR TEXTO
+# TELEGRAM: APROBACION + EDITAR TEXTO (RAPIDO, MISMA LOGICA)
 # ==========================================
 TG_SESSION = requests.Session()
 TG_SESSION.headers.update({"Connection": "keep-alive"})
@@ -170,34 +170,51 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_APPROVAL_TIMEOUT = int(os.getenv("TELEGRAM_APPROVAL_TIMEOUT", "300"))
 
+# Offset global: evita releer backlog en cada aprobación
+TG_OFFSET = None
+
 def tg_api(method: str) -> str:
     return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+
+def tg_init_offset() -> None:
+    """Flush backlog 1 sola vez al inicio del script."""
+    global TG_OFFSET
+    if not TELEGRAM_BOT_TOKEN:
+        TG_OFFSET = None
+        return
+    try:
+        r = TG_SESSION.get(tg_api("getUpdates"), params={"timeout": 0}, timeout=15)
+        r.raise_for_status()
+        data = r.json().get("result", [])
+        TG_OFFSET = (data[-1]["update_id"] + 1) if data else None
+    except Exception:
+        TG_OFFSET = None
 
 def tg_send_message(chat_id: str, text: str, reply_markup: dict | None = None) -> None:
     if not TELEGRAM_BOT_TOKEN or not chat_id:
         raise RuntimeError("Telegram no configurado: falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
 
-    payload = {"chat_id": chat_id, "text": text}  # <-- SIN parse_mode
+    payload = {"chat_id": chat_id, "text": text}  # sin parse_mode (evita 400 por Markdown)
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
     r = TG_SESSION.post(tg_api("sendMessage"), json=payload, timeout=20)
     if r.status_code != 200:
-        # Esto te va a mostrar el motivo exacto (ej: "can't parse entities" o "chat not found")
         try:
             print("[TELEGRAM] sendMessage error:", r.status_code, r.text)
         except Exception:
             pass
         r.raise_for_status()
 
-
 def tg_answer_callback(callback_query_id: str, text: str = "") -> None:
     payload = {"callback_query_id": callback_query_id, "text": text}
-    requests.post(tg_api("answerCallbackQuery"), json=payload, timeout=30)
+    # usar session + timeout corto (no frenar el bot por esto)
+    try:
+        TG_SESSION.post(tg_api("answerCallbackQuery"), json=payload, timeout=8)
+    except Exception:
+        pass
 
 def tg_buttons_for(approval_id: str, mode: str = "default") -> dict:
-    # mode="default": aprobar/rechazar/editar
-    # mode="post_edit": aprobar final/rechazar/editar de nuevo
     if mode == "post_edit":
         return {
             "inline_keyboard": [
@@ -223,46 +240,61 @@ def tg_buttons_for(approval_id: str, mode: str = "default") -> dict:
 def tg_send_approval(chat_id: str, approval_id: str, lead_url: str, real_name: str, bio_text: str, mensajes: list[str]) -> None:
     preview = "\n\n".join(mensajes)
     text = (
-        f"✅ *Aprobar DM antes de enviar*\n"
-        f"*Prospecto:* {real_name}\n"
-        f"*URL:* {lead_url}\n\n"
-        f"*Bio:* `{bio_text[:400]}`\n\n"
-        f"*Mensaje:* \n{preview}"
+        f"✅ Aprobar DM antes de enviar\n"
+        f"Prospecto: {real_name}\n"
+        f"URL: {lead_url}\n\n"
+        f"Bio: {bio_text[:400]}\n\n"
+        f"Mensaje:\n{preview}"
     )
     tg_send_message(chat_id, text, reply_markup=tg_buttons_for(approval_id, "default"))
 
 def tg_wait_decision_or_edit(approval_id: str, timeout_s: int) -> tuple[bool, str | None]:
     """
-    Devuelve:
+    MISMA LOGICA:
       (True, None) -> aprobado sin editar
       (False, None) -> rechazado o timeout
       (True, "texto...") -> aprobado con texto editado
+    OPTIMIZADO:
+      - long polling real (timeout 50)
+      - allowed_updates para menos payload
+      - offset GLOBAL para no releer backlog
+      - sin sleep(0.5)
     """
+    global TG_OFFSET
+
     deadline = time.time() + timeout_s
-    offset = None
     awaiting_text = False
     edited_text: str | None = None
 
-    def _matches_this_chat(update: dict) -> bool:
-        # Filtra por chat_id si lo configuraste
-        try:
-            return str(update["message"]["chat"]["id"]) == str(TELEGRAM_CHAT_ID)
-        except Exception:
-            return True
-
     while time.time() < deadline:
-        params = {"timeout": 25}
-        if offset is not None:
-            params["offset"] = offset
+        params = {
+            "timeout": 50,  # long-polling
+            "allowed_updates": ["callback_query", "message"],
+        }
+        if TG_OFFSET is not None:
+            params["offset"] = TG_OFFSET
 
-        r = requests.get(tg_api("getUpdates"), params=params, timeout=35)
-        r.raise_for_status()
-        data = r.json()
+        try:
+            r = TG_SESSION.get(tg_api("getUpdates"), params=params, timeout=60)
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
+            # micro backoff ante cortes
+            time.sleep(0.2)
+            continue
 
-        for upd in data.get("result", []):
-            offset = upd["update_id"] + 1
+        updates = data.get("result", [])
+        if not updates:
+            continue
 
-            # 1) Click de botones (callback_query)
+        for upd in updates:
+            # avanzar offset global SIEMPRE
+            try:
+                TG_OFFSET = upd["update_id"] + 1
+            except Exception:
+                pass
+
+            # 1) Botones
             cq = upd.get("callback_query")
             if cq:
                 cb_data = cq.get("data", "")
@@ -281,13 +313,19 @@ def tg_wait_decision_or_edit(approval_id: str, timeout_s: int) -> tuple[bool, st
                     awaiting_text = True
                     tg_send_message(
                         TELEGRAM_CHAT_ID,
-                        "✍️ *Modo edición*\nRespondé con el *texto final* a enviar (un solo mensaje)."
+                        "✍️ Modo edición\nRespondé con el texto final a enviar (un solo mensaje)."
                     )
                     continue
 
-            # 2) Mensaje de texto (para edición)
+            # 2) Texto (edición)
             msg = upd.get("message")
-            if msg and awaiting_text and _matches_this_chat(upd):
+            if msg and awaiting_text:
+                try:
+                    if str(msg["chat"]["id"]) != str(TELEGRAM_CHAT_ID):
+                        continue
+                except Exception:
+                    pass
+
                 txt = (msg.get("text") or "").strip()
                 if not txt:
                     continue
@@ -295,17 +333,15 @@ def tg_wait_decision_or_edit(approval_id: str, timeout_s: int) -> tuple[bool, st
                 edited_text = txt
                 awaiting_text = False
 
-                # Mostramos previsualización del editado y dejamos botones para aprobar
                 preview = edited_text if len(edited_text) <= 3500 else (edited_text[:3500] + "…")
                 tg_send_message(
                     TELEGRAM_CHAT_ID,
-                    f"📝 *Texto editado recibido*\n\n{preview}",
+                    f"📝 Texto editado recibido:\n\n{preview}",
                     reply_markup=tg_buttons_for(approval_id, "post_edit")
                 )
 
-        time.sleep(0.5)
-
     return False, None
+
 
 
 # ==========================================
@@ -438,7 +474,7 @@ def clean_message_part(text):
 def send_dm(driver, lead):
     print(f"[Navegando] {lead['url']}")
     driver.get(lead['url'])
-    time.sleep(random.uniform(5, 7))
+    time.sleep(random.uniform(2, 4))
     dismiss_popups(driver)
     
     real_name, bio_text = get_real_name_and_bio(driver, lead)
@@ -536,7 +572,7 @@ def main():
                 print(f"\n--- {lead['name']} ---")
                 if send_dm(driver, lead):
                     update_lead_status(lead['id'])
-                    wait = random.uniform(30, 50)
+                    wait = random.uniform(5, 10)
                     print(f"[ESPERA] {int(wait)}s...")
                     time.sleep(wait)
     except SystemExit as e:
