@@ -220,6 +220,7 @@ def tg_buttons_for(approval_id: str, mode: str = "default") -> dict:
             [
                 {"text": "✅ Aprobar", "callback_data": f"approve:{approval_id}"},
                 {"text": "❌ Rechazar", "callback_data": f"reject:{approval_id}"},
+                {"text": "✍️ Editar", "callback_data": f"edit:{approval_id}"},
             ]
         ]
     }
@@ -235,18 +236,23 @@ def tg_send_approval(chat_id: str, approval_id: str, lead_url: str, real_name: s
     )
     tg_send_message(chat_id, text, reply_markup=tg_buttons_for(approval_id, "default"))
 
-def tg_wait_decision(approval_id: str, timeout_s: int) -> bool:
+def tg_wait_decision_or_edit(approval_id: str, timeout_s: int) -> tuple[bool, str | None]:
     """
-    Devuelve True si aprueban, False si rechazan o timeout.
+    Devuelve:
+      (True, None) -> aprobado sin editar
+      (False, None) -> rechazado o timeout
+      (True, "texto...") -> aprobado con texto editado
     """
     global TG_OFFSET
 
     deadline = time.time() + timeout_s
+    awaiting_text = False
+    edited_text: str | None = None
 
     while time.time() < deadline:
         params = {
             "timeout": 50,
-            "allowed_updates": ["callback_query"],
+            "allowed_updates": ["callback_query", "message"],
         }
         if TG_OFFSET is not None:
             params["offset"] = TG_OFFSET
@@ -276,13 +282,44 @@ def tg_wait_decision(approval_id: str, timeout_s: int) -> bool:
 
                 if cb_data == f"approve:{approval_id}":
                     tg_answer_callback(cq_id, "Aprobado ✅")
-                    return True
+                    return True, edited_text
 
                 if cb_data == f"reject:{approval_id}":
                     tg_answer_callback(cq_id, "Rechazado ❌")
-                    return False
+                    return False, None
 
-    return False
+                if cb_data == f"edit:{approval_id}":
+                    tg_answer_callback(cq_id, "OK, enviá el texto nuevo ✍️")
+                    awaiting_text = True
+                    tg_send_message(
+                        TELEGRAM_CHAT_ID,
+                        "✍️ Modo edición\nRespondé con el texto final a enviar (un solo mensaje)."
+                    )
+                    continue
+
+            msg = upd.get("message")
+            if msg and awaiting_text:
+                try:
+                    if str(msg["chat"]["id"]) != str(TELEGRAM_CHAT_ID):
+                        continue
+                except Exception:
+                    pass
+
+                txt = (msg.get("text") or "").strip()
+                if not txt:
+                    continue
+
+                edited_text = txt
+                awaiting_text = False
+
+                preview = edited_text if len(edited_text) <= 3500 else (edited_text[:3500] + "…")
+                tg_send_message(
+                    TELEGRAM_CHAT_ID,
+                    f"📝 Texto editado recibido:\n\n{preview}",
+                    reply_markup=tg_buttons_for(approval_id, "post_edit")
+                )
+
+    return False, None
 
 
 
@@ -384,10 +421,10 @@ def generate_ai_message(real_name, bio_text):
         3. NO Emojis.
         
         EXAMPLES:
-        - "Your content is super clean \n\n Do you have help with the edits?"
-        - "Your vibe is super clean \n\n Is it just you managing this?"
-        - "Love your style \n\n How do you come up with ideas?"
-        - "Your feed is really cohesive \n\n Do you plan all posts in advance?"
+        - "{real_name}, your content is super clean \n\n Do you have help with the edits?"
+        - "{real_name}, your vibe is super clean \n\n Is it just you managing this?"
+        - "Love {real_name}, your style \n\n How do you come up with ideas?"
+        - "{real_name}, your feed is really cohesive \n\n Do you plan all posts in advance?"
     """
     
     api_url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
@@ -442,11 +479,17 @@ def send_dm(driver, lead):
                 bio_text=bio_text,
                 mensajes=mensajes
             )
-            ok = tg_wait_decision(approval_id, TELEGRAM_APPROVAL_TIMEOUT)
+            ok, edited = tg_wait_decision_or_edit(approval_id, TELEGRAM_APPROVAL_TIMEOUT)
             if not ok:
                 print("   [SKIP] Rechazado (o timeout) por Telegram.")
                 update_lead_status(lead['id'], "NO CUMPLE REQ")
                 return False
+
+            # Si se editó, usar el texto editado
+            if edited:
+                mensajes = [clean_message_part(p) for p in edited.split('\n') if p.strip()]
+                if len(mensajes) > 2: mensajes = mensajes[:2]
+                print(f"   [Mensaje Editado] {mensajes}")
         except Exception as e:
             print(f"   [WARN] No se pudo pedir aprobacion por Telegram: {e}")
             # Si querés que SIN Telegram NO ENVÍE JAMÁS, cambiá esto a: return False
