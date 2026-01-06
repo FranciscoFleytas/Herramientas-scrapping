@@ -160,6 +160,91 @@ def login_with_cookie(driver, account):
     return True
 
 # ==========================================
+# TELEGRAM: APROBACION MANUAL ANTES DE ENVIAR
+# ==========================================
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_APPROVAL_TIMEOUT = int(os.getenv("TELEGRAM_APPROVAL_TIMEOUT", "300"))
+
+def tg_api(method: str) -> str:
+    return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+
+def tg_send_approval(chat_id: str, approval_id: str, lead_url: str, real_name: str, bio_text: str, mensajes: list[str]) -> None:
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
+        raise RuntimeError("Telegram no configurado: falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
+
+    preview = "\n\n".join(mensajes)
+    text = (
+        f"✅ *Aprobar DM antes de enviar*\n"
+        f"*Prospecto:* {real_name}\n"
+        f"*URL:* {lead_url}\n\n"
+        f"*Bio:* `{bio_text[:400]}`\n\n"
+        f"*Mensaje:* \n{preview}"
+    )
+
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "reply_markup": {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Aprobar", "callback_data": f"approve:{approval_id}"},
+                    {"text": "❌ Rechazar", "callback_data": f"reject:{approval_id}"},
+                ]
+            ]
+        }
+    }
+    r = requests.post(tg_api("sendMessage"), json=payload, timeout=30)
+    r.raise_for_status()
+
+def tg_answer_callback(callback_query_id: str, text: str = "") -> None:
+    # Evita que quede el "loading..." en Telegram
+    payload = {"callback_query_id": callback_query_id, "text": text}
+    requests.post(tg_api("answerCallbackQuery"), json=payload, timeout=30)
+
+def tg_wait_decision(approval_id: str, timeout_s: int) -> bool:
+    """
+    Devuelve True si aprueban, False si rechazan o si vence el timeout.
+    Polling simple por getUpdates (bloqueante).
+    """
+    deadline = time.time() + timeout_s
+    offset = None
+
+    while time.time() < deadline:
+        params = {"timeout": 25}
+        if offset is not None:
+            params["offset"] = offset
+
+        r = requests.get(tg_api("getUpdates"), params=params, timeout=35)
+        r.raise_for_status()
+        data = r.json()
+
+        for upd in data.get("result", []):
+            offset = upd["update_id"] + 1
+
+            cq = upd.get("callback_query")
+            if not cq:
+                continue
+
+            cb_data = cq.get("data", "")
+            cq_id = cq.get("id")
+
+            if cb_data == f"approve:{approval_id}":
+                tg_answer_callback(cq_id, "Aprobado ✅")
+                return True
+
+            if cb_data == f"reject:{approval_id}":
+                tg_answer_callback(cq_id, "Rechazado ❌")
+                return False
+
+        time.sleep(0.5)
+
+    return False
+
+
+# ==========================================
 # 3. NOTION
 # ==========================================
 
@@ -275,6 +360,13 @@ def generate_ai_message(real_name, bio_text):
     except Exception as e:
         raise SystemExit(f"Ollama Connection Error: {e}")
 
+def safe_generate_ai_message(real_name, bio_text):
+    try:
+        return generate_ai_message(real_name, bio_text)
+    except Exception as e:
+        print(f"[CRITICO] Error en generacion de mensaje AI: {e}")
+        raise SystemExit("Script finalizado inmediatamente debido a fallo en AI.")
+
 def clean_message_part(text):
     return remove_non_bmp(text).strip()
 
@@ -287,13 +379,34 @@ def send_dm(driver, lead):
     real_name, bio_text = get_real_name_and_bio(driver, lead)
     print(f"   [Prospecto] {real_name}")
 
-    full_msg = generate_ai_message(real_name, bio_text)
+    full_msg = safe_generate_ai_message(real_name, bio_text)
     full_msg = full_msg.replace('<br><br>', '\n\n')  # Filtro para convertir <br><br> en saltos de línea
     mensajes = [clean_message_part(p) for p in full_msg.split('\n') if p.strip()]
     
     if len(mensajes) > 2: mensajes = mensajes[:2] # Hard limit 2
     
     print(f"   [Mensaje] {mensajes}")
+
+    # ======= TELEGRAM APPROVAL GATE =======
+    approval_id = f"{lead.get('id','noid')}:{int(time.time())}"
+    try:
+        tg_send_approval(
+            chat_id=TELEGRAM_CHAT_ID,
+            approval_id=approval_id,
+            lead_url=lead["url"],
+            real_name=real_name,
+            bio_text=bio_text,
+            mensajes=mensajes
+        )
+        ok = tg_wait_decision(approval_id, TELEGRAM_APPROVAL_TIMEOUT)
+        if not ok:
+            print("   [SKIP] Rechazado (o timeout) por Telegram.")
+            return False
+    except Exception as e:
+        print(f"   [WARN] No se pudo pedir aprobacion por Telegram: {e}")
+        # Si querés que SIN Telegram NO ENVÍE JAMÁS, cambiá esto a: return False
+        return False
+    # ======= FIN TELEGRAM APPROVAL GATE =======
     
     wait = WebDriverWait(driver, 8)
     entrado = False
