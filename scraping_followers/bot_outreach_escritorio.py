@@ -48,6 +48,7 @@ OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "60"))
 ESTADO_TRIGGER = "Escribir" 
 ESTADO_FINAL = "Contactado"
 MODO_HEADLESS = False
+USE_TELEGRAM = True  # Cambiar a True para usar Telegram para aprobación antes de enviar mensajes
 DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # ==========================================
@@ -100,7 +101,7 @@ def human_type(element, text):
     safe_text = remove_non_bmp(text)
     for char in safe_text:
         element.send_keys(char)
-        time.sleep(random.uniform(0.03, 0.08))
+        time.sleep(random.uniform(0.01, 0.02))
 
 def dismiss_popups(driver):
     textos = ["Ahora no", "Not Now", "Cancelar", "Cancel", "Activar"]
@@ -160,8 +161,10 @@ def login_with_cookie(driver, account):
     return True
 
 # ==========================================
-# TELEGRAM: APROBACION MANUAL ANTES DE ENVIAR
+# TELEGRAM: APROBACION + EDITAR TEXTO
 # ==========================================
+TG_SESSION = requests.Session()
+TG_SESSION.headers.update({"Connection": "keep-alive"})
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -170,10 +173,54 @@ TELEGRAM_APPROVAL_TIMEOUT = int(os.getenv("TELEGRAM_APPROVAL_TIMEOUT", "300"))
 def tg_api(method: str) -> str:
     return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
 
-def tg_send_approval(chat_id: str, approval_id: str, lead_url: str, real_name: str, bio_text: str, mensajes: list[str]) -> None:
+def tg_send_message(chat_id: str, text: str, reply_markup: dict | None = None) -> None:
     if not TELEGRAM_BOT_TOKEN or not chat_id:
         raise RuntimeError("Telegram no configurado: falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID")
 
+    payload = {"chat_id": chat_id, "text": text}  # <-- SIN parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    r = TG_SESSION.post(tg_api("sendMessage"), json=payload, timeout=20)
+    if r.status_code != 200:
+        # Esto te va a mostrar el motivo exacto (ej: "can't parse entities" o "chat not found")
+        try:
+            print("[TELEGRAM] sendMessage error:", r.status_code, r.text)
+        except Exception:
+            pass
+        r.raise_for_status()
+
+
+def tg_answer_callback(callback_query_id: str, text: str = "") -> None:
+    payload = {"callback_query_id": callback_query_id, "text": text}
+    requests.post(tg_api("answerCallbackQuery"), json=payload, timeout=30)
+
+def tg_buttons_for(approval_id: str, mode: str = "default") -> dict:
+    # mode="default": aprobar/rechazar/editar
+    # mode="post_edit": aprobar final/rechazar/editar de nuevo
+    if mode == "post_edit":
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Aprobar envío", "callback_data": f"approve:{approval_id}"},
+                    {"text": "❌ Rechazar", "callback_data": f"reject:{approval_id}"},
+                ],
+                [
+                    {"text": "✍️ Editar de nuevo", "callback_data": f"edit:{approval_id}"}
+                ]
+            ]
+        }
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Aprobar", "callback_data": f"approve:{approval_id}"},
+                {"text": "❌ Rechazar", "callback_data": f"reject:{approval_id}"},
+                {"text": "✍️ Editar", "callback_data": f"edit:{approval_id}"},
+            ]
+        ]
+    }
+
+def tg_send_approval(chat_id: str, approval_id: str, lead_url: str, real_name: str, bio_text: str, mensajes: list[str]) -> None:
     preview = "\n\n".join(mensajes)
     text = (
         f"✅ *Aprobar DM antes de enviar*\n"
@@ -182,35 +229,26 @@ def tg_send_approval(chat_id: str, approval_id: str, lead_url: str, real_name: s
         f"*Bio:* `{bio_text[:400]}`\n\n"
         f"*Mensaje:* \n{preview}"
     )
+    tg_send_message(chat_id, text, reply_markup=tg_buttons_for(approval_id, "default"))
 
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-        "reply_markup": {
-            "inline_keyboard": [
-                [
-                    {"text": "✅ Aprobar", "callback_data": f"approve:{approval_id}"},
-                    {"text": "❌ Rechazar", "callback_data": f"reject:{approval_id}"},
-                ]
-            ]
-        }
-    }
-    r = requests.post(tg_api("sendMessage"), json=payload, timeout=30)
-    r.raise_for_status()
-
-def tg_answer_callback(callback_query_id: str, text: str = "") -> None:
-    # Evita que quede el "loading..." en Telegram
-    payload = {"callback_query_id": callback_query_id, "text": text}
-    requests.post(tg_api("answerCallbackQuery"), json=payload, timeout=30)
-
-def tg_wait_decision(approval_id: str, timeout_s: int) -> bool:
+def tg_wait_decision_or_edit(approval_id: str, timeout_s: int) -> tuple[bool, str | None]:
     """
-    Devuelve True si aprueban, False si rechazan o si vence el timeout.
-    Polling simple por getUpdates (bloqueante).
+    Devuelve:
+      (True, None) -> aprobado sin editar
+      (False, None) -> rechazado o timeout
+      (True, "texto...") -> aprobado con texto editado
     """
     deadline = time.time() + timeout_s
     offset = None
+    awaiting_text = False
+    edited_text: str | None = None
+
+    def _matches_this_chat(update: dict) -> bool:
+        # Filtra por chat_id si lo configuraste
+        try:
+            return str(update["message"]["chat"]["id"]) == str(TELEGRAM_CHAT_ID)
+        except Exception:
+            return True
 
     while time.time() < deadline:
         params = {"timeout": 25}
@@ -224,24 +262,50 @@ def tg_wait_decision(approval_id: str, timeout_s: int) -> bool:
         for upd in data.get("result", []):
             offset = upd["update_id"] + 1
 
+            # 1) Click de botones (callback_query)
             cq = upd.get("callback_query")
-            if not cq:
-                continue
+            if cq:
+                cb_data = cq.get("data", "")
+                cq_id = cq.get("id")
 
-            cb_data = cq.get("data", "")
-            cq_id = cq.get("id")
+                if cb_data == f"approve:{approval_id}":
+                    tg_answer_callback(cq_id, "Aprobado ✅")
+                    return True, edited_text
 
-            if cb_data == f"approve:{approval_id}":
-                tg_answer_callback(cq_id, "Aprobado ✅")
-                return True
+                if cb_data == f"reject:{approval_id}":
+                    tg_answer_callback(cq_id, "Rechazado ❌")
+                    return False, None
 
-            if cb_data == f"reject:{approval_id}":
-                tg_answer_callback(cq_id, "Rechazado ❌")
-                return False
+                if cb_data == f"edit:{approval_id}":
+                    tg_answer_callback(cq_id, "OK, enviá el texto nuevo ✍️")
+                    awaiting_text = True
+                    tg_send_message(
+                        TELEGRAM_CHAT_ID,
+                        "✍️ *Modo edición*\nRespondé con el *texto final* a enviar (un solo mensaje)."
+                    )
+                    continue
+
+            # 2) Mensaje de texto (para edición)
+            msg = upd.get("message")
+            if msg and awaiting_text and _matches_this_chat(upd):
+                txt = (msg.get("text") or "").strip()
+                if not txt:
+                    continue
+
+                edited_text = txt
+                awaiting_text = False
+
+                # Mostramos previsualización del editado y dejamos botones para aprobar
+                preview = edited_text if len(edited_text) <= 3500 else (edited_text[:3500] + "…")
+                tg_send_message(
+                    TELEGRAM_CHAT_ID,
+                    f"📝 *Texto editado recibido*\n\n{preview}",
+                    reply_markup=tg_buttons_for(approval_id, "post_edit")
+                )
 
         time.sleep(0.5)
 
-    return False
+    return False, None
 
 
 # ==========================================
@@ -330,8 +394,7 @@ def get_real_name_and_bio(driver, lead):
 def generate_ai_message(real_name, bio_text):
     # Prompt del Backup adaptado para Ollama (Inglés + Corto)
     prompt = f"""
-    ROLE: Natural Instagram User.
-        TASK: Send a friendly, curious DM.
+    TASK: Send a friendly, curious DM.
         BIO CONTEXT: "{bio_text}"
         
         MANDATORY FORMAT: [Statement] \n\n [Question]?
@@ -343,8 +406,10 @@ def generate_ai_message(real_name, bio_text):
         3. NO Emojis.
         
         EXAMPLES:
-        - "your content is super clean \n\n do you have help with the edits?"
-        - "love the vibe of your profile \n\n is it just you managing this?"
+        - "Your content is super clean \n\n Do you have help with the edits?"
+        - "Your vibe is super clean \n\n Is it just you managing this?"
+        - "Love your style \n\n How do you come up with ideas?"
+        - "Your feed is really cohesive \n\n Do you plan all posts in advance?"
     """
     
     api_url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
@@ -388,24 +453,25 @@ def send_dm(driver, lead):
     print(f"   [Mensaje] {mensajes}")
 
     # ======= TELEGRAM APPROVAL GATE =======
-    approval_id = f"{lead.get('id','noid')}:{int(time.time())}"
-    try:
-        tg_send_approval(
-            chat_id=TELEGRAM_CHAT_ID,
-            approval_id=approval_id,
-            lead_url=lead["url"],
-            real_name=real_name,
-            bio_text=bio_text,
-            mensajes=mensajes
-        )
-        ok = tg_wait_decision(approval_id, TELEGRAM_APPROVAL_TIMEOUT)
-        if not ok:
-            print("   [SKIP] Rechazado (o timeout) por Telegram.")
+    if USE_TELEGRAM:
+        approval_id = f"{lead.get('id','noid')}:{int(time.time())}"
+        try:
+            tg_send_approval(
+                chat_id=TELEGRAM_CHAT_ID,
+                approval_id=approval_id,
+                lead_url=lead["url"],
+                real_name=real_name,
+                bio_text=bio_text,
+                mensajes=mensajes
+            )
+            ok, _ = tg_wait_decision_or_edit(approval_id, TELEGRAM_APPROVAL_TIMEOUT)
+            if not ok:
+                print("   [SKIP] Rechazado (o timeout) por Telegram.")
+                return False
+        except Exception as e:
+            print(f"   [WARN] No se pudo pedir aprobacion por Telegram: {e}")
+            # Si querés que SIN Telegram NO ENVÍE JAMÁS, cambiá esto a: return False
             return False
-    except Exception as e:
-        print(f"   [WARN] No se pudo pedir aprobacion por Telegram: {e}")
-        # Si querés que SIN Telegram NO ENVÍE JAMÁS, cambiá esto a: return False
-        return False
     # ======= FIN TELEGRAM APPROVAL GATE =======
     
     wait = WebDriverWait(driver, 8)
@@ -432,7 +498,7 @@ def send_dm(driver, lead):
 
     if entrado:
         try:
-            time.sleep(4)
+            time.sleep(2)
             dismiss_popups(driver)
             box = wait.until(EC.presence_of_element_located((By.XPATH, "//div[@contenteditable='true'] | //div[@role='textbox']")))
             box.click()
@@ -440,7 +506,7 @@ def send_dm(driver, lead):
             
             for msg in mensajes:
                 human_type(box, msg)
-                time.sleep(0.5)
+                time.sleep(0.02)
                 box.send_keys(Keys.ENTER)
                 time.sleep(random.uniform(2, 4))
             
