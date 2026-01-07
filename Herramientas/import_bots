@@ -1,0 +1,81 @@
+import json
+import os
+
+# --- CONFIGURACIÓN ---
+INPUT_FILE = 'all.txt'       # Tu archivo con las cookies crudas
+OUTPUT_FILE = 'cuentas.json' # El archivo que generaremos para los bots
+
+def extract_sessions():
+    if not os.path.exists(INPUT_FILE):
+        print(f"[ERROR] No se encontró el archivo {INPUT_FILE}")
+        return
+
+    extracted_accounts = []
+    
+    print(f"--- LEYENDO {INPUT_FILE} ---")
+    
+    try:
+        with open(INPUT_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            
+        print(f"Total de líneas encontradas: {len(lines)}")
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line: continue
+            
+            # ESTRATEGIA: Buscamos dónde empieza el JSON de cookies (corchete "[")
+            try:
+                json_start_index = line.find("[")
+                
+                if json_start_index == -1:
+                    print(f"[SKIP] Línea {i+1}: No se encontraron cookies (falta '[')")
+                    continue
+                
+                # 1. Extraer Datos
+                # Todo lo que está antes del corchete son las credenciales
+                credentials_part = line[:json_start_index]
+                # Todo lo que está desde el corchete es el JSON
+                json_str = line[json_start_index:]
+                
+                # Extraemos el usuario (es lo primero antes del primer ':')
+                # Formato: usuario:pass:email...
+                username = credentials_part.split(':')[0].strip()
+                
+                # 2. Parsear Cookies
+                cookies_list = json.loads(json_str)
+                session_id = None
+                
+                for cookie in cookies_list:
+                    if cookie.get('name') == 'sessionid':
+                        session_id = cookie.get('value')
+                        break
+                
+                if session_id:
+                    extracted_accounts.append({
+                        "user": username,
+                        "sessionid": session_id
+                    })
+                    print(f"[OK] Usuario: {username} | SessionID extraída.")
+                else:
+                    print(f"[WARN] Línea {i+1}: El usuario {username} no tiene 'sessionid' válida.")
+                        
+            except json.JSONDecodeError:
+                print(f"[ERROR] Línea {i+1}: El formato de las cookies está corrupto.")
+            except Exception as e:
+                print(f"[ERROR] Línea {i+1}: {e}")
+
+        # Guardar en cuentas.json
+        if extracted_accounts:
+            with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+                json.dump(extracted_accounts, f, indent=4)
+            print(f"\n--- ÉXITO ---")
+            print(f"Se generó '{OUTPUT_FILE}' con {len(extracted_accounts)} cuentas listas.")
+        else:
+            print("\n[ERROR] No se pudo extraer ninguna cuenta.")
+
+    except Exception as e:
+        print(f"Error crítico abriendo el archivo: {e}")
+
+if __name__ == "__main__":
+    extract_sessions()
